@@ -45,6 +45,303 @@ class Reg(StatesGroup):
 # ── AI prompts ─────────────────────────────────────────────────────────────────
 TODAY = str(date.today())
 
+VALIDATE_PROMPT = """Ты — валидатор прайс-листов геоматериалов.
+Получишь JSON-массив сырых строк извлечённых из Excel.
+Твоя задача: нормализовать, проверить и дополнить каждую строку.
+
+Ответь ТОЛЬКО валидным JSON-массивом без markdown:
+[{
+  "product":       "геотекстиль 200 г/м²",
+  "category":      "геотекстиль",
+  "density":       200,
+  "width":         4.5,
+  "roll_length":   50,
+  "thickness":     null,
+  "color":         null,
+  "material":      "ПЭ",
+  "price":         26.79,
+  "unit":          "м²",
+  "price_per_roll": 6032.55,
+  "price_date":    "2026-02-01",
+  "original":      "Геотекстиль \"Пошхим\"  200"
+}]
+
+Правила:
+- product: нижний регистр, без кавычек и торговых марок → "геотекстиль 200 г/м²"
+- density: извлеки из названия (80, 100, 150, 200...) или null
+- material: из названия (ПЭ→ПЭ, PP→PP, HDPE, ПВД...) или null
+- thickness: для мембран в мм, иначе null
+- price_per_roll: price × width × roll_length (если оба есть), иначе null
+- price_date: подставь дату из контекста если передана, иначе сегодня
+- НЕ добавляй строки которых не было, НЕ меняй цены
+- ПРОПУСТИ строки с ценой 0 или без названия"""
+
+
+async def ai_validate(raw_rows: list[dict], price_date: str) -> list[dict]:
+    """Шаг 2: AI проверяет и нормализует данные от Python-парсера."""
+    # Батчи по 80 строк чтобы не превысить контекст
+    BATCH = 80
+    result = []
+    for i in range(0, len(raw_rows), BATCH):
+        batch = raw_rows[i:i + BATCH]
+        payload = json.dumps(batch, ensure_ascii=False)
+        r = await ai.chat.completions.create(
+            model=MODEL_TEXT,
+            messages=[
+                {"role": "system", "content": VALIDATE_PROMPT},
+                {"role": "user",   "content": f"price_date: {price_date}\n\n{payload}"},
+            ],
+            max_tokens=6000,
+            temperature=0,
+        )
+        raw = r.choices[0].message.content.strip().strip("```json").strip("```").strip()
+        result.extend(json.loads(raw))
+    return result
+
+
+
+# ── Pipeline: Python parse → AI validate → save ──────────────────────────────
+
+import re as _re
+
+_CAT_MAP = {
+    "геотекстиль эко": "геотекстиль",
+    "геотекстиль":     "геотекстиль",
+    "георешетка":      "георешетка",
+    "геомембрана":     "геомембрана",
+    "термовойлок":     "прочее",
+    "ватин":           "прочее",
+    "анкера":          "прочее",
+    "дренаж":          "дренаж",
+    "спанбонд":        "спанбонд",
+}
+_SKIP_SHEETS = {"содержание", "оглавление", "для формирования цены", "contents", "sheet1"}
+
+
+def _density(name: str):
+    m = _re.search(r"(\d+(?:\.\d+)?)\s*(?:г/м[²2])?\s*$", name.strip())
+    if m:
+        return float(m.group(1))
+    m2 = _re.search(r"\s(\d{2,4})\s*$", name.strip())
+    return float(m2.group(1)) if m2 else None
+
+
+def python_parse_excel(raw_bytes: bytes) -> tuple[list[dict], str | None]:
+    """
+    Шаг 1: Python структурно вытаскивает все строки с ценами.
+    Возвращает (raw_rows, price_date).
+    raw_rows — «сырые» данные, ещё не нормализованные.
+    """
+    xl = pd.ExcelFile(BytesIO(raw_bytes))
+    rows = []
+    found_date = None
+
+    for sheet in xl.sheet_names:
+        if sheet.lower().strip() in _SKIP_SHEETS:
+            continue
+        try:
+            df = pd.read_excel(xl, sheet_name=sheet, header=None)
+        except Exception:
+            continue
+
+        category = _CAT_MAP.get(sheet.lower().strip(), "прочее")
+
+        # Дата в первых 5 строках
+        if not found_date:
+            for i in range(min(5, len(df))):
+                for val in df.iloc[i].values:
+                    if hasattr(val, "strftime"):
+                        found_date = val.strftime("%Y-%m-%d")
+                        break
+                if found_date:
+                    break
+
+        # Найти строку заголовков
+        header_row = width_col = roll_col = price_col = None
+        for i, row in df.iterrows():
+            row_str = " ".join(str(v) for v in row.values if pd.notna(v))
+            if "Ширина" in row_str and ("Намотк" in row_str or "намотк" in row_str):
+                header_row = i
+                for j, val in enumerate(row.values):
+                    s = str(val).lower() if pd.notna(val) else ""
+                    if "ширина" in s and width_col is None:  width_col = j
+                    elif "намотк" in s and roll_col is None: roll_col  = j
+                    elif "дилер" in s and price_col is None: price_col = j
+                if width_col  is None: width_col  = 3
+                if roll_col   is None: roll_col   = 4
+                if price_col  is None: price_col  = 10
+                break
+
+        if header_row is None:
+            continue
+
+        cur_name = None
+        for i in range(header_row + 1, len(df)):
+            row = df.iloc[i]
+            nv = row.iloc[0] if pd.notna(row.iloc[0]) else None
+            if nv and str(nv).strip() not in ("nan", ""):
+                cur_name = str(nv).strip()
+
+            if not cur_name:
+                continue
+            try:
+                width  = float(row.iloc[width_col])  if pd.notna(row.iloc[width_col])  else None
+                roll   = float(row.iloc[roll_col])   if pd.notna(row.iloc[roll_col])   else None
+                price  = float(row.iloc[price_col])  if pd.notna(row.iloc[price_col])  else None
+            except (ValueError, TypeError, IndexError):
+                continue
+
+            if not price or price <= 0 or (width is None and roll is None):
+                continue
+
+            rows.append({
+                "raw_name": cur_name,
+                "category": category,
+                "width":    width,
+                "roll_length": roll,
+                "price":    price,
+                "unit":     "м²",
+            })
+
+    return rows, found_date
+
+
+
+# ── AI prompts ─────────────────────────────────────────────────────────────────
+TODAY = str(date.today())
+
+# ── Direct Excel parser (structured, no AI) ───────────────────────────────────
+_CAT_MAP = {
+    "геотекстиль эко": "геотекстиль",
+    "геотекстиль":     "геотекстиль",
+    "георешетка":      "георешетка",
+    "геомембрана":     "геомембрана",
+    "термовойлок":     "прочее",
+    "ватин":           "прочее",
+    "анкера":          "прочее",
+    "дренаж":          "дренаж",
+    "спанбонд":        "спанбонд",
+}
+_SKIP_SHEETS = {"содержание", "оглавление", "для формирования цены", "contents", "sheet1"}
+
+def _extract_density(name: str) -> float | None:
+    import re
+    m = re.search(r"(\d+(?:\.\d+)?)\s*(?:г/м²|г/м2|г)?\s*$", name.strip())
+    if m:
+        return float(m.group(1))
+    m2 = re.search(r"\s(\d{2,4})\s*$", name.strip())
+    return float(m2.group(1)) if m2 else None
+
+def parse_excel_direct(raw_bytes: bytes, price_date: str = None) -> list[dict]:
+    """
+    Структурный парсер для прайсов с колонками:
+    0=название, 3=ширина, 4=намотка, 10=цена ДИЛЕР
+    Возвращает список dict совместимых с save_prices().
+    """
+    import re
+    xl = pd.ExcelFile(BytesIO(raw_bytes))
+    results = []
+    found_date = price_date
+
+    for sheet in xl.sheet_names:
+        if sheet.lower().strip() in _SKIP_SHEETS:
+            continue
+        try:
+            df = pd.read_excel(xl, sheet_name=sheet, header=None)
+        except Exception:
+            continue
+
+        category = _CAT_MAP.get(sheet.lower().strip(), "прочее")
+
+        # Ищем дату в первых 5 строках
+        if not found_date:
+            for i in range(min(5, len(df))):
+                for val in df.iloc[i].values:
+                    if hasattr(val, "strftime"):
+                        found_date = val.strftime("%Y-%m-%d")
+                        break
+                if found_date:
+                    break
+
+        # Найти строку заголовков (содержит "Ширина" и "Намотка")
+        header_row = None
+        price_col  = None
+        width_col  = None
+        roll_col   = None
+        name_col   = 0
+
+        for i, row in df.iterrows():
+            row_str = " ".join(str(v) for v in row.values if pd.notna(v))
+            if "Ширина" in row_str and ("Намотка" in row_str or "намотк" in row_str.lower()):
+                header_row = i
+                # Определяем индексы нужных колонок
+                for j, val in enumerate(row.values):
+                    s = str(val).lower() if pd.notna(val) else ""
+                    if "ширина" in s:
+                        width_col = j
+                    elif "намотк" in s:
+                        roll_col = j
+                    elif "дилер" in s:
+                        price_col = j
+                # Fallback: известная структура (col 3, 4, 10)
+                if width_col  is None: width_col  = 3
+                if roll_col   is None: roll_col   = 4
+                if price_col  is None: price_col  = 10
+                break
+
+        if header_row is None:
+            # Попробуем AI-парсинг для этого листа
+            continue
+
+        current_name    = None
+        current_density = None
+
+        for i in range(header_row + 1, len(df)):
+            row = df.iloc[i]
+
+            # Обновить текущее название
+            name_val = row.iloc[name_col] if pd.notna(row.iloc[name_col]) else None
+            if name_val and str(name_val).strip() not in ("nan", ""):
+                current_name    = str(name_val).strip()
+                current_density = _extract_density(current_name)
+
+            if not current_name:
+                continue
+
+            try:
+                width    = float(row.iloc[width_col])  if (width_col  < len(row) and pd.notna(row.iloc[width_col]))  else None
+                roll_len = float(row.iloc[roll_col])   if (roll_col   < len(row) and pd.notna(row.iloc[roll_col]))   else None
+                price    = float(row.iloc[price_col])  if (price_col  < len(row) and pd.notna(row.iloc[price_col]))  else None
+            except (ValueError, TypeError):
+                continue
+
+            if not price or price <= 0:
+                continue
+            if width is None and roll_len is None:
+                continue
+
+            ppr = round(price * width * roll_len, 2) if (width and roll_len) else None
+
+            # Нормализация имени
+            product = re.sub(r'"[^"]+"\'|«[^»]+»', "", current_name).strip().lower()
+            product = re.sub(r"\s+", " ", product).strip()
+
+            results.append({
+                "product":          product,
+                "product_original": current_name,
+                "category":         category,
+                "density":          current_density,
+                "width":            width,
+                "roll_length":      roll_len,
+                "price":            price,
+                "unit":             "м²",
+                "price_per_roll":   ppr,
+                "price_date":       found_date or str(date.today()),
+                "original":         current_name,
+            })
+
+    return results
+
 PARSE_PROMPT = f"""Ты — парсер прайс-листов строительных материалов (геотекстиль, георешётка, геомембрана, спанбонд, дренаж и др.).
 
 Извлеки ВСЕ товарные позиции с ценами. Ответь ТОЛЬКО валидным JSON-массивом без markdown:
@@ -382,21 +679,25 @@ async def on_document(msg: Message):
         fname = msg.document.file_name or "price"
 
         if fname.lower().endswith((".xlsx", ".xls")):
-            xl    = pd.ExcelFile(BytesIO(raw.read()))
-            skip  = {"содержание", "оглавление", "для формирования цены", "contents"}
-            parts = []
-            for sheet in xl.sheet_names:
-                if sheet.lower().strip() in skip:
-                    continue
-                try:
-                    df = pd.read_excel(xl, sheet_name=sheet, header=None)
-                    df = df.dropna(how="all").dropna(axis=1, how="all")
-                    if df.empty:
-                        continue
-                    parts.append(f"=== {sheet} ===\n{df.to_string(index=False, header=False)}")
-                except Exception:
-                    continue
-            content = "\n\n".join(parts)
+            raw_bytes = raw.read()
+
+            # Шаг 1: Python структурно вытаскивает все строки
+            await msg.answer("📊 Шаг 1/2: Python читает структуру файла...")
+            raw_rows, price_date = python_parse_excel(raw_bytes)
+
+            if not raw_rows:
+                await msg.answer("❌ Не удалось найти таблицу с ценами. Проверьте формат файла.")
+                return
+
+            await msg.answer(f"✅ Найдено строк: {len(raw_rows)}\n⏳ Шаг 2/2: AI проверяет и нормализует...")
+
+            # Шаг 2: AI валидирует и нормализует
+            items = await ai_validate(raw_rows, price_date or TODAY)
+
+            # Шаг 3: сохраняем в базу
+            count = await save_prices(items, user, fname)
+            await msg.answer(ok_msg(count, user["city"], price_date), parse_mode="Markdown")
+            return
         elif fname.lower().endswith(".csv"):
             df      = pd.read_csv(BytesIO(raw.read()), encoding="utf-8-sig")
             content = df.to_string(index=False)
