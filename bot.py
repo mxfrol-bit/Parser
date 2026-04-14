@@ -18,6 +18,7 @@ load_dotenv()
 
 BOT_TOKEN      = os.getenv("BOT_TOKEN")
 OPENROUTER_KEY = os.getenv("OPENROUTER_KEY")
+ADMIN_IDS      = [int(x) for x in os.getenv("ADMIN_IDS","").split(",") if x.strip()]
 SUPABASE_URL   = os.getenv("SUPABASE_URL")
 SUPABASE_KEY   = os.getenv("SUPABASE_KEY")
 
@@ -45,8 +46,13 @@ claude = anthropic.AsyncAnthropic(api_key=ANTHROPIC_KEY) if ANTHROPIC_KEY else N
 
 # ── States ─────────────────────────────────────────────────────────────────────
 class Reg(StatesGroup):
-    role = State()
-    city = State()
+    role     = State()
+    city     = State()
+    supplier = State()   # название поставщика (обязательно для снабженца)
+
+class Edit(StatesGroup):
+    city     = State()
+    supplier = State()
 
 # ── AI prompts ─────────────────────────────────────────────────────────────────
 TODAY = str(date.today())
@@ -534,7 +540,7 @@ async def save_prices(items: list, user: dict, source: str = None) -> int:
             "unit":             item.get("unit", "м²"),
             "price_per_roll":   ppr,
             "supplier_id":      user["telegram_id"],
-            "supplier_name":    user["name"],
+            "supplier_name":    user.get("supplier_name") or user["name"],
             "city":             user["city"],
             "price_date":       item.get("price_date", TODAY),
             "source_file":      source,
@@ -579,12 +585,14 @@ async def get_history(product: str, city: str = None) -> list:
     return r.data
 
 # ── Format ─────────────────────────────────────────────────────────────────────
-def fmt_result(items: list, query: str, norm: str) -> str:
+def fmt_result(items: list, query: str, norm: str) -> tuple:
+    """Возвращает (текст, клавиатура)."""
     if not items:
         return (
             f"❌ По запросу *{query}* ничего не найдено.\n"
             f"_Искал: «{norm}»_\n\n"
-            "Попробуйте другое название."
+            "Попробуйте другое название.",
+            None
         )
 
     by_city: dict[str, dict] = {}
@@ -595,32 +603,64 @@ def fmt_result(items: list, query: str, norm: str) -> str:
 
     sorted_items = sorted(by_city.values(), key=lambda x: x["price"])
     medals = ["🥇", "🥈", "🥉"]
-    lines = [f"📦 *{norm}*\n"]
+    txt_lines = [f"📦 *{norm}*\n"]
 
     for i, item in enumerate(sorted_items[:10]):
         prefix = medals[i] if i < 3 else "  •"
-        dt = (item.get("price_date") or "")[:10]
+        dt  = (item.get("price_date") or "")[:10]
+        sup = item.get("supplier_name") or "—"
+
         attrs = []
-        if item.get("density"):     attrs.append(f'{item["density"]} г/м²')
-        if item.get("width"):       attrs.append(f'{item["width"]} м шир')
-        if item.get("roll_length"): attrs.append(f'{item["roll_length"]} м нам')
-        if item.get("thickness"):   attrs.append(f'{item["thickness"]} мм')
-        attr_str = f"  _{'  ·  '.join(attrs)}_\n" if attrs else ""
+        if item.get("density"):
+            attrs.append(f'плотность {item["density"]} г/м²')
+        if item.get("width") and item.get("roll_length"):
+            attrs.append(f'рулон {item["width"]}м × {int(item["roll_length"])}м')
+        elif item.get("width"):
+            attrs.append(f'ширина {item["width"]} м')
+        elif item.get("roll_length"):
+            attrs.append(f'намотка {int(item["roll_length"])} м')
+        if item.get("thickness"):
+            attrs.append(f'толщина {item["thickness"]} мм')
+
+        d  = item.get("density")
+        w  = item.get("width")
+        rl = item.get("roll_length")
+        weight_str = ""
+        if d and w and rl:
+            kg = round(float(d) * float(w) * float(rl) / 1000, 1)
+            weight_str = f"  ⚖️ ~{kg} кг/рул\n"
 
         ppr = item.get("price_per_roll")
-        roll_str = f"  _{int(ppr):,} р/рул_".replace(",", " ") if ppr else ""
+        roll_str = f"  💰 {int(ppr):,} р/рул\n".replace(",", " ") if ppr else ""
+        attr_str = f"  _{'  ·  '.join(attrs)}_\n" if attrs else ""
 
-        lines.append(
-            f"{prefix} *{item['city']}* — {item['price']:.2f} р/{item['unit']}\n"
+        txt_lines.append(
+            f"{prefix} *{item['city']}* — *{item['price']:.2f} р/{item['unit']}*\n"
             f"{attr_str}"
             f"{roll_str}"
-            f"  └ {item['supplier_name']} · {dt}"
+            f"{weight_str}"
+            f"  🏢 {sup} · 📅 {dt}"
         )
 
     if len(by_city) > 10:
-        lines.append(f"\n_...ещё {len(by_city)-10} городов_")
-    lines.append("\n_Для истории: /history <товар> [город]_")
-    return "\n".join(lines)
+        txt_lines.append(f"\n_...ещё {len(by_city)-10} городов_")
+
+    # Inline кнопки
+    city_btns = [
+        InlineKeyboardButton(
+            text=f"📈 {item['city']}",
+            callback_data=f"hist:{norm[:28]}:{item['city'][:18]}"
+        ) for item in sorted_items[:3]
+    ]
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        city_btns,
+        [
+            InlineKeyboardButton(text="🔄 Обновить", callback_data=f"search:{norm[:38]}"),
+            InlineKeyboardButton(text="🌍 Все города", callback_data=f"allcities:{norm[:36]}"),
+        ],
+    ]) if city_btns else None
+
+    return "\n".join(txt_lines), kb
 
 def fmt_history(items: list, product: str, city: str = None) -> str:
     loc = f" — {city}" if city else ""
@@ -688,36 +728,124 @@ async def reg_city(msg: Message, state: FSMContext):
     data = await state.get_data()
     role = data["role"]
     city = msg.text.strip()
-
-    supabase.table("users").insert({
-        "telegram_id": msg.from_user.id,
-        "username":    msg.from_user.username or "",
-        "name":        msg.from_user.full_name,
-        "role":        role,
-        "city":        city,
-    }).execute()
-    await state.clear()
+    await state.update_data(city=city)
 
     if role == "snabzhenets":
         await msg.answer(
-            f"✅ Зарегистрированы как *Снабженец*, г. {city}\n\n"
-            "Отправляйте прайсы в любом виде:\n"
-            "• Excel / CSV файл\n"
-            "• Фото или скриншот прайса\n"
-            "• Текст сообщением\n\n"
-            "Нейронка сама распознает позиции, характеристики, цены и дату.",
+            f"Город: *{city}*\n\n"
+            "Теперь укажите *название поставщика*\n"
+            "_например: ООО Геотекс, ИП Иванов, Армпласт_",
             parse_mode="Markdown",
         )
+        await state.set_state(Reg.supplier)
     else:
+        supabase.table("users").insert({
+            "telegram_id":   msg.from_user.id,
+            "username":      msg.from_user.username or "",
+            "name":          msg.from_user.full_name,
+            "role":          role,
+            "city":          city,
+            "supplier_name": "",
+        }).execute()
+        await state.clear()
         await msg.answer(
             f"✅ Зарегистрированы как *Менеджер*, г. {city}\n\n"
-            "Напишите название товара:\n"
-            "_геотекстиль 200_\n"
-            "_геомембрана 1мм_\n"
-            "_спанбонд 60_\n\n"
-            "Для истории цен: `/history геотекстиль 200 Казань`",
+            "Напишите название товара и я найду лучшую цену.\n"
+            "_геотекстиль 200_  /  _мембрана 1мм_  /  _спанбонд 60_",
             parse_mode="Markdown",
         )
+
+
+@router.message(Reg.supplier)
+async def reg_supplier(msg: Message, state: FSMContext):
+    data    = await state.get_data()
+    city    = data["city"]
+    sup     = msg.text.strip()
+
+    supabase.table("users").insert({
+        "telegram_id":   msg.from_user.id,
+        "username":      msg.from_user.username or "",
+        "name":          msg.from_user.full_name,
+        "role":          "snabzhenets",
+        "city":          city,
+        "supplier_name": sup,
+    }).execute()
+    await state.clear()
+    await msg.answer(
+        f"✅ Зарегистрированы как *Снабженец*\n\n"
+        f"📍 Город: {city}\n"
+        f"🏢 Поставщик: *{sup}*\n\n"
+        "Отправляйте прайсы — Excel, фото, текст.\n"
+        "Нейронка распознает позиции, характеристики и цены.\n\n"
+        "_Изменить город: /setcity_\n"
+        "_Изменить поставщика: /setsupplier_",
+        parse_mode="Markdown",
+    )
+
+# ── /myinfo, /setcity, /setsupplier commands ──────────────────────────────────
+
+@router.message(F.text == "/myinfo")
+async def cmd_myinfo(msg: Message):
+    user = await get_user(msg.from_user.id)
+    if not user:
+        await msg.answer("Начните с /start")
+        return
+    role = "Снабженец" if user["role"] == "snabzhenets" else "Менеджер"
+    sup  = user.get("supplier_name") or "не указан"
+    await msg.answer(
+        f"👤 *Ваш профиль*\n\n"
+        f"Роль: {role}\n"
+        f"Город: {user['city']}\n"
+        f"Поставщик: {sup}\n\n"
+        "_/setcity — сменить город_\n"
+        "_/setsupplier — сменить поставщика_",
+        parse_mode="Markdown",
+    )
+
+
+@router.message(F.text.startswith("/setcity"))
+async def cmd_setcity(msg: Message, state: FSMContext):
+    user = await get_user(msg.from_user.id)
+    if not user:
+        await msg.answer("Начните с /start"); return
+    inline = msg.text.replace("/setcity", "").strip()
+    if inline:
+        supabase.table("users").update({"city": inline}).eq("telegram_id", msg.from_user.id).execute()
+        await msg.answer(f"✅ Город изменён на *{inline}*", parse_mode="Markdown")
+    else:
+        await msg.answer("Введите новый город:")
+        await state.set_state(Edit.city)
+
+
+@router.message(Edit.city)
+async def edit_city(msg: Message, state: FSMContext):
+    city = msg.text.strip()
+    supabase.table("users").update({"city": city}).eq("telegram_id", msg.from_user.id).execute()
+    await state.clear()
+    await msg.answer(f"✅ Город изменён на *{city}*", parse_mode="Markdown")
+
+
+@router.message(F.text.startswith("/setsupplier"))
+async def cmd_setsupplier(msg: Message, state: FSMContext):
+    user = await get_user(msg.from_user.id)
+    if not user:
+        await msg.answer("Начните с /start"); return
+    inline = msg.text.replace("/setsupplier", "").strip()
+    if inline:
+        supabase.table("users").update({"supplier_name": inline}).eq("telegram_id", msg.from_user.id).execute()
+        await msg.answer(f"✅ Поставщик изменён на *{inline}*", parse_mode="Markdown")
+    else:
+        await msg.answer("Введите название поставщика:")
+        await state.set_state(Edit.supplier)
+
+
+@router.message(Edit.supplier)
+async def edit_supplier(msg: Message, state: FSMContext):
+    sup = msg.text.strip()
+    supabase.table("users").update({"supplier_name": sup}).eq("telegram_id", msg.from_user.id).execute()
+    await state.clear()
+    await msg.answer(f"✅ Поставщик изменён на *{sup}*", parse_mode="Markdown")
+
 
 # ── History command ────────────────────────────────────────────────────────────
 @router.message(F.text.startswith("/history"))
@@ -843,10 +971,100 @@ async def on_text(msg: Message):
         await msg.answer("🔍 Ищу...")
         try:
             items, norm = await search_prices(msg.text)
-            await msg.answer(fmt_result(items, msg.text.strip(), norm), parse_mode="Markdown")
+            text, kb = fmt_result(items, msg.text.strip(), norm)
+            await msg.answer(text, parse_mode="Markdown", reply_markup=kb)
         except Exception as e:
             log.error(f"search error: {e}")
             await msg.answer("❌ Ошибка поиска.")
+
+# ── Callback buttons ──────────────────────────────────────────────────────────
+
+@router.callback_query(F.data.startswith("hist:"))
+async def cb_history(cb: CallbackQuery):
+    parts = cb.data.split(":")
+    product = parts[1] if len(parts) > 1 else ""
+    city    = parts[2] if len(parts) > 2 else None
+    await cb.answer()
+    items = await get_history(product, city if city else None)
+    text  = fmt_history(items, product, city)
+    await cb.message.answer(text, parse_mode="Markdown")
+
+
+@router.callback_query(F.data.startswith("search:"))
+async def cb_search(cb: CallbackQuery):
+    query = cb.data.replace("search:", "")
+    await cb.answer("Обновляю...")
+    items, norm = await search_prices(query)
+    text, kb = fmt_result(items, query, norm)
+    await cb.message.answer(text, parse_mode="Markdown", reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("allcities:"))
+async def cb_allcities(cb: CallbackQuery):
+    query = cb.data.replace("allcities:", "")
+    await cb.answer()
+    items, norm = await search_prices(query)
+    if not items:
+        await cb.message.answer(f"❌ Ничего не найдено по «{norm}»")
+        return
+    by_city: dict[str, dict] = {}
+    for item in items:
+        city = item["city"]
+        if city not in by_city or item["price"] < by_city[city]["price"]:
+            by_city[city] = item
+    sorted_items = sorted(by_city.values(), key=lambda x: x["price"])
+    lines = [f"📦 *{norm}* — все города\n"]
+    for item in sorted_items:
+        dt = (item.get("price_date") or "")[:10]
+        lines.append(f"• *{item['city']}* — {item['price']:.2f} р/{item['unit']}  _{item['supplier_name']} · {dt}_")
+    await cb.message.answer("\n".join(lines), parse_mode="Markdown")
+
+
+# ── Admin commands ────────────────────────────────────────────────────────────
+
+def is_admin(tg_id: int) -> bool:
+    return tg_id in ADMIN_IDS
+
+
+@router.message(F.text.startswith("/setrole"))
+async def cmd_setrole(msg: Message):
+    if not is_admin(msg.from_user.id):
+        await msg.answer("⛔ Нет доступа.")
+        return
+    # /setrole @username role  или  /setrole 123456789 role
+    parts = msg.text.split()
+    if len(parts) < 3:
+        await msg.answer("Формат: `/setrole <telegram_id> <snabzhenets|manager|admin>`", parse_mode="Markdown")
+        return
+    try:
+        tg_id = int(parts[1])
+    except ValueError:
+        await msg.answer("Укажите числовой Telegram ID")
+        return
+    role = parts[2].lower()
+    if role not in ("snabzhenets", "manager", "admin"):
+        await msg.answer("Роль: snabzhenets | manager | admin")
+        return
+    supabase.table("users").update({"role": role}).eq("telegram_id", tg_id).execute()
+    await msg.answer(f"✅ Роль пользователя `{tg_id}` изменена на *{role}*", parse_mode="Markdown")
+
+
+@router.message(F.text == "/users")
+async def cmd_users(msg: Message):
+    if not is_admin(msg.from_user.id):
+        await msg.answer("⛔ Нет доступа.")
+        return
+    r = supabase.table("users").select("*").order("created_at", desc=True).execute()
+    if not r.data:
+        await msg.answer("Пользователей нет.")
+        return
+    lines = ["👥 *Пользователи:*\n"]
+    for u in r.data[:30]:
+        role_emoji = "📦" if u["role"]=="snabzhenets" else "🔍" if u["role"]=="manager" else "⚙"
+        sup = f" · {u['supplier_name']}" if u.get("supplier_name") else ""
+        lines.append(f"{role_emoji} `{u['telegram_id']}` {u['name']}{sup} — {u['city']}")
+    await msg.answer("\n".join(lines), parse_mode="Markdown")
+
 
 # ── Run ────────────────────────────────────────────────────────────────────────
 async def main():

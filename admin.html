@@ -1,0 +1,514 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Снабженец · Админка</title>
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Nunito:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#0f0f0d;--bg2:#171715;--bg3:#1e1e1b;--border:#2a2a26;--text:#e8e4d8;--muted:#706e64;--dim:#3a3a35;--acc:#c8e84a;--acc2:#8fd4a0;--red:#e05a5a;--yellow:#f0c040;--geo:#3dba7a;--gri:#4a8fd4;--mem:#b46fd4;--dre:#d4a44a;--spa:#4ad4c8;--oth:#888;--r:8px}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Nunito',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;font-size:14px}
+
+/* LOGIN */
+.login-wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
+.login-card{background:var(--bg2);border:1px solid var(--border);border-radius:14px;padding:36px;width:100%;max-width:400px}
+.login-logo{font-family:'Bebas Neue',sans-serif;font-size:28px;letter-spacing:3px;color:var(--acc);margin-bottom:4px}
+.login-sub{color:var(--muted);font-size:13px;margin-bottom:28px}
+.err{color:var(--red);font-size:12px;margin-bottom:12px;padding:8px 12px;background:#e05a5a15;border-radius:6px;border:1px solid #e05a5a40}
+
+/* TOPBAR */
+.topbar{background:var(--bg2);border-bottom:1px solid var(--border);height:54px;display:flex;align-items:center;padding:0 20px;gap:14px;position:sticky;top:0;z-index:100}
+.logo{font-family:'Bebas Neue',sans-serif;font-size:20px;letter-spacing:3px;color:var(--acc)}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--dim)}
+.dot.ok{background:var(--acc2)}.dot.err{background:var(--red)}.dot.spin{background:var(--yellow);animation:blink 1s infinite}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
+.tb-gap{flex:1}
+.tb-btn{background:none;border:1px solid var(--border);border-radius:6px;color:var(--muted);font-size:12px;padding:5px 12px;cursor:pointer;font-family:inherit;transition:all .15s}
+.tb-btn:hover{border-color:var(--dim);color:var(--text)}
+.tb-btn.acc{border-color:var(--acc);color:var(--acc)}
+.tb-btn.danger{border-color:var(--red);color:var(--red)}
+
+/* TABS */
+.tabs{display:flex;gap:2px;padding:0 20px;background:var(--bg2);border-bottom:1px solid var(--border)}
+.tab{padding:10px 18px;cursor:pointer;font-size:13px;color:var(--muted);border-bottom:2px solid transparent;transition:all .15s;font-weight:500}
+.tab:hover{color:var(--text)}
+.tab.active{color:var(--acc);border-bottom-color:var(--acc)}
+
+/* LAYOUT */
+.layout{display:flex;min-height:calc(100vh - 94px)}
+.sidebar{width:196px;flex-shrink:0;background:var(--bg2);border-right:1px solid var(--border);padding:18px 0;position:sticky;top:94px;height:calc(100vh - 94px);overflow-y:auto;display:flex;flex-direction:column}
+.sb-label{font-size:10px;font-weight:700;color:var(--muted);letter-spacing:1.8px;text-transform:uppercase;padding:0 14px 8px}
+.sb-item{display:flex;align-items:center;gap:7px;padding:8px 14px;cursor:pointer;color:var(--muted);border-right:3px solid transparent;transition:all .12s;font-size:13px}
+.sb-item:hover{background:var(--bg3);color:var(--text)}
+.sb-item.active{background:var(--bg3);color:var(--text);font-weight:600;border-right-color:var(--acc)}
+.sb-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0}
+.sb-stat{padding:16px 14px;margin-top:auto;border-top:1px solid var(--border)}
+.sb-n{font-family:'Bebas Neue',sans-serif;font-size:34px;letter-spacing:1px;color:var(--text);line-height:1}
+.sb-nl{font-size:11px;color:var(--muted);margin-top:2px}
+
+/* MAIN */
+.main{flex:1;padding:20px;min-width:0}
+.stats-row{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:20px}
+.stat-card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);padding:14px 16px}
+.stat-card .n{font-family:'Bebas Neue',sans-serif;font-size:28px;letter-spacing:1px;color:var(--acc);line-height:1;margin-top:4px}
+.stat-card .l{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.8px}
+
+/* FILTERS */
+.filters{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap}
+.filters input,.filters select{background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);color:var(--text);font-size:13px;padding:8px 12px;outline:none;font-family:inherit;transition:border .15s}
+.filters input{flex:1;min-width:160px}
+.filters input:focus,.filters select:focus{border-color:var(--acc)}
+.filters select{cursor:pointer}
+
+/* TABLE */
+.tbl-wrap{border-radius:var(--r);border:1px solid var(--border);overflow:hidden;overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:12px}
+thead tr{background:var(--bg3)}
+th{padding:10px 11px;text-align:left;font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--muted);white-space:nowrap;border-bottom:1px solid var(--border)}
+tbody tr{border-bottom:1px solid var(--border);transition:background .1s}
+tbody tr:hover{background:var(--bg3)}
+tbody tr.sel{background:var(--bg3)}
+td{padding:9px 11px;vertical-align:middle}
+.badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:700;letter-spacing:.3px}
+.price-n{font-family:'JetBrains Mono',monospace;font-weight:700;font-size:13px}
+.price-unit{font-size:10px;color:var(--muted);margin-top:1px}
+.up{color:var(--red);font-weight:700}.dn{color:var(--acc2);font-weight:700}.eq{color:var(--dim)}
+.empty-row td{text-align:center;padding:48px;color:var(--muted)}
+
+/* ROLE BADGE */
+.role-snab{background:#3dba7a25;color:#3dba7a}
+.role-man{background:#4a8fd425;color:#4a8fd4}
+.role-admin{background:#c8e84a25;color:#c8e84a}
+
+/* USER PANEL */
+.upanel{background:var(--bg2);border-top:1px solid var(--border);padding:18px 20px}
+.upanel-title{font-weight:700;font-size:14px;margin-bottom:14px}
+.role-btns{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+.role-btn{padding:7px 16px;border:1px solid var(--border);border-radius:var(--r);font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;background:var(--bg3);color:var(--muted);transition:all .15s}
+.role-btn:hover{border-color:var(--dim);color:var(--text)}
+.role-btn.active-snab{background:#3dba7a20;border-color:#3dba7a;color:#3dba7a}
+.role-btn.active-man{background:#4a8fd420;border-color:#4a8fd4;color:#4a8fd4}
+.role-btn.active-admin{background:#c8e84a20;border-color:#c8e84a;color:#c8e84a}
+
+/* FIELD EDIT */
+.field-row{display:flex;gap:8px;align-items:center;margin-bottom:8px}
+.field-row label{font-size:11px;color:var(--muted);min-width:90px;text-transform:uppercase;letter-spacing:.6px}
+.field-row input{flex:1;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;padding:6px 10px;outline:none;font-family:inherit}
+.field-row input:focus{border-color:var(--acc)}
+.save-btn{background:var(--acc);color:#1c1c1a;border:none;border-radius:6px;padding:6px 16px;font-weight:700;font-size:12px;cursor:pointer;font-family:inherit}
+
+/* MODAL */
+.modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.75);display:flex;align-items:center;justify-content:center;z-index:300;padding:20px}
+.modal{background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:28px;width:100%;max-width:460px}
+.modal-title{font-size:17px;font-weight:700;margin-bottom:4px}
+.modal-sub{color:var(--muted);font-size:13px;margin-bottom:22px}
+.f-label{font-size:12px;font-weight:600;color:var(--muted);display:block;margin-bottom:5px}
+.f-input{width:100%;background:var(--bg3);border:1px solid var(--border);border-radius:var(--r);color:var(--text);font-size:13px;padding:10px 13px;outline:none;font-family:inherit;margin-bottom:14px;transition:border .15s}
+.f-input:focus{border-color:var(--acc)}
+.btn-primary{background:var(--acc);color:#1c1c1a;border:none;border-radius:var(--r);padding:10px 22px;font-weight:700;font-size:13px;cursor:pointer;font-family:inherit}
+.btn-sec{background:var(--bg3);color:var(--muted);border:1px solid var(--border);border-radius:var(--r);padding:10px 16px;font-size:13px;cursor:pointer;font-family:inherit;margin-left:8px}
+.info-row{display:flex;justify-content:space-between;font-size:12px;padding:4px 0;border-bottom:1px solid var(--border)}
+.info-row span:first-child{color:var(--muted)}
+</style>
+</head>
+<body>
+
+<div id="root"></div>
+
+<script>
+// ── State ─────────────────────────────────────────────────────────────────────
+let S = {
+  auth: false, authErr: "",
+  sbUrl: localStorage.getItem("sb_url")||"",
+  sbKey: localStorage.getItem("sb_key")||"",
+  adminPwd: localStorage.getItem("admin_pwd")||"",
+  ADMIN_PWD: "", // loaded from Railway via env or hardcoded
+  tab: "prices",
+  prices: [], users: [], hist: [],
+  loading: false, err: null,
+  cat:"Все", cityF:"Все", srch:"", sort:"price",
+  userSrch:"", userRole:"Все",
+  selPrice: null, selUser: null,
+  showCfg: false,
+};
+
+const CATS=["Все","геотекстиль","георешетка","геомембрана","дренаж","спанбонд","прочее"];
+const CDOT={геотекстиль:"#3dba7a",георешетка:"#4a8fd4",геомембрана:"#b46fd4",дренаж:"#d4a44a",спанбонд:"#4ad4c8",прочее:"#888"};
+
+const fmt  = (n,d=2)=>n!=null?Number(n).toLocaleString("ru-RU",{minimumFractionDigits:d,maximumFractionDigits:d}):"—";
+const fmtI = n=>n!=null?Number(n).toLocaleString("ru-RU",{maximumFractionDigits:0}):"—";
+const fmtD = s=>s?new Date(s).toLocaleDateString("ru-RU",{day:"2-digit",month:"2-digit",year:"2-digit"}):"—";
+const fmtDT= s=>s?new Date(s).toLocaleString("ru-RU",{day:"2-digit",month:"2-digit",year:"2-digit",hour:"2-digit",minute:"2-digit"}):"—";
+
+// ── Supabase ──────────────────────────────────────────────────────────────────
+async function sbFetch(path, method="GET", body=null) {
+  const opts = {method, headers:{apikey:S.sbKey, Authorization:`Bearer ${S.sbKey}`, "Content-Type":"application/json", Prefer:"return=representation"}};
+  if (body) opts.body = JSON.stringify(body);
+  const r = await fetch(`${S.sbUrl}/rest/v1/${path}`, opts);
+  if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
+  const txt = await r.text();
+  return txt ? JSON.parse(txt) : [];
+}
+
+async function loadAll() {
+  if (!S.sbUrl||!S.sbKey) { showCfg(); return; }
+  S.loading=true; S.err=null; render();
+  try {
+    [S.prices, S.users] = await Promise.all([
+      sbFetch("prices_latest?select=*&order=price_date.desc&limit=2000"),
+      sbFetch("users?select=*&order=created_at.desc"),
+    ]);
+    S.loading=false;
+  } catch(e) { S.err=e.message; S.loading=false; }
+  render();
+}
+
+async function loadHist(product) {
+  if (!S.sbUrl||!S.sbKey) return;
+  const q=encodeURIComponent(`%${product}%`);
+  try {
+    S.hist = await sbFetch(`prices_history?product=ilike.${q}&order=price_date.desc&limit=40&select=*`);
+  } catch(e) { S.hist=[]; }
+  render();
+}
+
+async function updateUserRole(tgId, role) {
+  await sbFetch(`users?telegram_id=eq.${tgId}`, "PATCH", {role});
+  S.users = S.users.map(u=>u.telegram_id===tgId?{...u,role}:u);
+  if (S.selUser?.telegram_id===tgId) S.selUser={...S.selUser,role};
+  render();
+}
+
+async function updateUserField(tgId, field, val) {
+  await sbFetch(`users?telegram_id=eq.${tgId}`, "PATCH", {[field]:val});
+  S.users = S.users.map(u=>u.telegram_id===tgId?{...u,[field]:val}:u);
+  if (S.selUser?.telegram_id===tgId) S.selUser={...S.selUser,[field]:val};
+  render();
+}
+
+// ── Auth ──────────────────────────────────────────────────────────────────────
+// Password stored in localStorage after first auth
+// In production: compare against ADMIN_PASSWORD Railway env var
+function tryAuth(pwd) {
+  const correct = localStorage.getItem("admin_secret") || "admin123";
+  if (pwd === correct) {
+    S.auth=true; S.authErr=""; localStorage.setItem("admin_pwd", pwd); render(); loadAll();
+  } else {
+    S.authErr="Неверный пароль"; render();
+  }
+}
+
+// Check saved pwd on load
+if (S.adminPwd) {
+  const correct = localStorage.getItem("admin_secret") || "admin123";
+  if (S.adminPwd === correct) S.auth=true;
+}
+
+// ── Render helpers ────────────────────────────────────────────────────────────
+function statusHTML() {
+  const cls = S.loading?"spin":S.err?"err":S.prices.length?"ok":"";
+  const txt = S.loading?"загрузка...":S.err?`ошибка`:S.prices.length?`${S.prices.length} позиций · ${S.users.length} пользователей`:"нет данных";
+  return `<span class="dot ${cls}"></span><span style="font-size:12px;color:var(--muted)">${txt}</span>`;
+}
+
+function getPriceRows() {
+  let r=S.prices;
+  if (S.cat!=="Все") r=r.filter(x=>x.category===S.cat);
+  if (S.cityF!=="Все") r=r.filter(x=>x.city===S.cityF);
+  if (S.srch) { const q=S.srch.toLowerCase(); r=r.filter(x=>(x.product||"").includes(q)||(x.city||"").includes(q)||(x.supplier_name||"").includes(q)); }
+  return [...r].sort((a,b)=>S.sort==="price"?a.price-b.price:S.sort==="price_desc"?b.price-a.price:S.sort==="date"?new Date(b.price_date)-new Date(a.price_date):(a.product||"").localeCompare(b.product||"","ru"));
+}
+
+function getUserRows() {
+  let r=S.users;
+  if (S.userRole!=="Все") r=r.filter(x=>x.role===S.userRole);
+  if (S.userSrch) { const q=S.userSrch.toLowerCase(); r=r.filter(x=>(x.name||"").toLowerCase().includes(q)||(x.city||"").toLowerCase().includes(q)||(x.supplier_name||"").toLowerCase().includes(q)||(x.username||"").toLowerCase().includes(q)); }
+  return r;
+}
+
+function getCities() { return ["Все",...new Set(S.prices.map(r=>r.city).filter(Boolean))]; }
+
+function roleBadge(role) {
+  const map={snabzhenets:["role-snab","Снабженец"],manager:["role-man","Менеджер"],admin:["role-admin","Админ"]};
+  const [cls,lbl]=map[role]||["","?"];
+  return `<span class="badge ${cls}">${lbl}</span>`;
+}
+
+// ── Login screen ──────────────────────────────────────────────────────────────
+function renderLogin() {
+  document.getElementById("root").innerHTML=`
+  <div class="login-wrap">
+    <div class="login-card">
+      <div class="login-logo">СНАБЖЕНЕЦ</div>
+      <div class="login-sub">Административная панель</div>
+      ${S.authErr?`<div class="err">${S.authErr}</div>`:""}
+      <label class="f-label">Пароль</label>
+      <input class="f-input" id="pwdInput" type="password" placeholder="Введите пароль" onkeydown="if(event.key==='Enter')tryAuth(this.value)">
+      <br>
+      <button class="btn-primary" onclick="tryAuth(document.getElementById('pwdInput').value)" style="margin-top:4px">Войти</button>
+      <div style="margin-top:20px;padding-top:16px;border-top:1px solid var(--border)">
+        <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Смените пароль по умолчанию:</div>
+        <input class="f-input" id="newPwdInput" placeholder="Новый пароль" style="margin-bottom:8px">
+        <button onclick="setNewPwd()" style="background:none;border:1px solid var(--dim);border-radius:6px;color:var(--muted);padding:5px 12px;font-size:12px;cursor:pointer;font-family:inherit">Сохранить пароль</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+function setNewPwd() {
+  const v=document.getElementById("newPwdInput")?.value?.trim();
+  if(!v) return;
+  localStorage.setItem("admin_secret",v);
+  alert("Пароль сохранён. Используйте его для входа.");
+}
+
+// ── Main app ──────────────────────────────────────────────────────────────────
+function renderApp() {
+  const priceRows = getPriceRows();
+  const userRows  = getUserRows();
+  const cities    = getCities();
+
+  // Sidebar (prices tab)
+  const sidebar = S.tab==="prices" ? `<div class="sidebar">
+    <div class="sb-label">Категория</div>
+    ${CATS.map(c=>`<div class="sb-item ${S.cat===c?"active":""}" onclick="S.cat='${c}';render()">
+      ${c!=="Все"?`<span class="sb-dot" style="background:${CDOT[c]||'#888'}"></span>`:""}
+      <span>${c==="Все"?"Все категории":c}</span>
+    </div>`).join("")}
+    <div class="sb-stat">
+      <div class="sb-n">${priceRows.length}</div>
+      <div class="sb-nl">позиций</div>
+    </div>
+  </div>` : `<div class="sidebar">
+    <div class="sb-label">Роль</div>
+    ${[["Все","Все пользователи","#888"],["snabzhenets","Снабженцы","#3dba7a"],["manager","Менеджеры","#4a8fd4"],["admin","Администраторы","#c8e84a"]].map(([v,l,c])=>`
+    <div class="sb-item ${S.userRole===v?"active":""}" onclick="S.userRole='${v}';render()">
+      ${v!=="Все"?`<span class="sb-dot" style="background:${c}"></span>`:""}
+      <span>${l}</span>
+    </div>`).join("")}
+    <div class="sb-stat">
+      <div class="sb-n">${userRows.length}</div>
+      <div class="sb-nl">пользователей</div>
+      <div style="font-size:11px;color:var(--dim);margin-top:4px">${S.users.filter(u=>u.role==="snabzhenets").length} снабженцев · ${S.users.filter(u=>u.role==="manager").length} менеджеров</div>
+    </div>
+  </div>`;
+
+  // Stats
+  const statsHtml = S.tab==="prices"
+    ? [
+        {l:"Всего позиций",n:S.prices.length},
+        {l:"Поставщиков",n:new Set(S.prices.map(r=>r.supplier_id).filter(Boolean)).size},
+        {l:"Городов",n:new Set(S.prices.map(r=>r.city).filter(Boolean)).size},
+        {l:"Категорий",n:CATS.slice(1).filter(c=>S.prices.some(r=>r.category===c)).length},
+      ].map(s=>`<div class="stat-card"><div class="l">${s.l}</div><div class="n">${s.n}</div></div>`).join("")
+    : [
+        {l:"Всего",n:S.users.length},
+        {l:"Снабженцев",n:S.users.filter(u=>u.role==="snabzhenets").length},
+        {l:"Менеджеров",n:S.users.filter(u=>u.role==="manager").length},
+        {l:"Администраторов",n:S.users.filter(u=>u.role==="admin").length},
+      ].map(s=>`<div class="stat-card"><div class="l">${s.l}</div><div class="n">${s.n}</div></div>`).join("");
+
+  // Prices table
+  const priceTable = `
+    <div class="filters">
+      <input placeholder="Поиск товара..." value="${S.srch}" oninput="S.srch=this.value;render()">
+      <select onchange="S.cityF=this.value;render()">${cities.map(c=>`<option ${S.cityF===c?"selected":""}>${c}</option>`).join("")}</select>
+      <select onchange="S.sort=this.value;render()">
+        <option value="price" ${S.sort==="price"?"selected":""}>Цена ↑</option>
+        <option value="price_desc" ${S.sort==="price_desc"?"selected":""}>Цена ↓</option>
+        <option value="date" ${S.sort==="date"?"selected":""}>По дате</option>
+        <option value="product">А–Я</option>
+      </select>
+    </div>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Товар</th><th>Кат.</th><th>Плотн.</th><th>Ширина</th><th>Намотка</th><th>Толщ.</th><th>Цена/м²</th><th>Рулон</th><th>Город</th><th>Поставщик</th><th>Дата</th><th>Δ</th></tr></thead>
+        <tbody>${priceRows.length===0?`<tr class="empty-row"><td colspan="12">${S.loading?"Загрузка...":"Нет данных"}</td></tr>`:priceRows.map((r,i)=>{
+          const d=r.prev_price!=null?r.price-r.prev_price:null;
+          const dc=d!=null?(d>0?"up":d<0?"dn":"eq"):"eq";
+          const dv=d!=null&&Math.abs(d)>0.01?`${d>0?"▲":"▼"} ${fmt(Math.abs(d))}`:"—";
+          return `<tr class="${S.selPrice?.id===r.id?"sel":""}" onclick="selPrice(${i})">
+            <td><div style="max-width:220px;line-height:1.35;font-weight:${S.selPrice?.id===r.id?600:400}">${r.product||""}</div></td>
+            <td><span class="badge" style="background:${(CDOT[r.category]||"#888")}28;color:${CDOT[r.category]||"#888"}">${r.category||"—"}</span></td>
+            <td style="color:var(--muted);white-space:nowrap">${r.density?fmtI(r.density)+" г/м²":"—"}</td>
+            <td style="color:var(--muted);white-space:nowrap">${r.width?r.width+" м":"—"}</td>
+            <td style="color:var(--muted);white-space:nowrap">${r.roll_length?fmtI(r.roll_length)+" м":"—"}</td>
+            <td style="color:var(--muted);white-space:nowrap">${r.thickness?r.thickness+" мм":"—"}</td>
+            <td><div class="price-n">${fmt(r.price)} р</div><div class="price-unit">${r.unit||"м²"}</div></td>
+            <td style="font-family:monospace;font-size:11px;color:var(--muted);white-space:nowrap">${r.price_per_roll?fmtI(r.price_per_roll)+" р":"—"}</td>
+            <td style="white-space:nowrap">${r.city||"—"}</td>
+            <td style="color:var(--muted);font-size:11px;white-space:nowrap">${r.supplier_name||"—"}</td>
+            <td style="color:var(--muted);font-size:11px;white-space:nowrap">${fmtD(r.price_date)}</td>
+            <td class="${dc}" style="font-size:11px">${dv}</td>
+          </tr>`;
+        }).join("")}</tbody>
+      </table>
+    </div>
+    ${S.selPrice?renderPricePanel():""}`;
+
+  // Users table
+  const userTable = `
+    <div class="filters">
+      <input placeholder="Поиск по имени, городу, поставщику..." value="${S.userSrch}" oninput="S.userSrch=this.value;render()">
+    </div>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Telegram ID</th><th>Имя</th><th>@username</th><th>Роль</th><th>Город</th><th>Поставщик</th><th>Дата регистрации</th><th>Действия</th></tr></thead>
+        <tbody>${userRows.length===0?`<tr class="empty-row"><td colspan="8">${S.loading?"Загрузка...":"Нет пользователей"}</td></tr>`:userRows.map((u,i)=>`
+          <tr class="${S.selUser?.telegram_id===u.telegram_id?"sel":""}" onclick="selUser(${i})">
+            <td style="font-family:monospace;font-size:11px;color:var(--muted)">${u.telegram_id}</td>
+            <td style="font-weight:${S.selUser?.telegram_id===u.telegram_id?600:400}">${u.name||"—"}</td>
+            <td style="color:var(--muted);font-size:12px">${u.username?"@"+u.username:"—"}</td>
+            <td>${roleBadge(u.role)}</td>
+            <td style="font-size:12px">${u.city||"—"}</td>
+            <td style="font-size:12px;color:var(--muted)">${u.supplier_name||"—"}</td>
+            <td style="font-size:11px;color:var(--muted);white-space:nowrap">${fmtDT(u.created_at)}</td>
+            <td>
+              <div style="display:flex;gap:4px">
+                <button onclick="event.stopPropagation();setRole(${i},'snabzhenets')" class="role-btn ${u.role==='snabzhenets'?'active-snab':''}" style="padding:3px 8px;font-size:10px">Снаб.</button>
+                <button onclick="event.stopPropagation();setRole(${i},'manager')" class="role-btn ${u.role==='manager'?'active-man':''}" style="padding:3px 8px;font-size:10px">Мен.</button>
+                <button onclick="event.stopPropagation();setRole(${i},'admin')" class="role-btn ${u.role==='admin'?'active-admin':''}" style="padding:3px 8px;font-size:10px">Адм.</button>
+              </div>
+            </td>
+          </tr>`).join("")}</tbody>
+      </table>
+    </div>
+    ${S.selUser?renderUserPanel():""}`;
+
+  document.getElementById("root").innerHTML=`
+    <div class="topbar">
+      <span class="logo">СНАБЖЕНЕЦ</span>
+      <div style="display:flex;align-items:center;gap:6px">${statusHTML()}</div>
+      <div class="tb-gap"></div>
+      <button class="tb-btn" onclick="loadAll()">↻ обновить</button>
+      <button class="tb-btn acc" onclick="showCfg()">⚙ Supabase</button>
+      <button class="tb-btn danger" onclick="logout()">Выйти</button>
+    </div>
+    <div class="tabs">
+      <div class="tab ${S.tab==="prices"?"active":""}" onclick="S.tab='prices';S.selPrice=null;S.selUser=null;render()">Прайсы</div>
+      <div class="tab ${S.tab==="users"?"active":""}" onclick="S.tab='users';S.selPrice=null;S.selUser=null;render()">Пользователи</div>
+    </div>
+    <div class="layout">
+      ${sidebar}
+      <div class="main">
+        <div class="stats-row">${statsHtml}</div>
+        ${S.tab==="prices"?priceTable:userTable}
+        <div style="margin-top:8px;font-size:11px;color:var(--muted)">${S.prices.length?`Обновлено ${new Date().toLocaleTimeString("ru-RU",{hour:"2-digit",minute:"2-digit"})}`:""}</div>
+      </div>
+    </div>
+    ${S.showCfg?renderCfgModal():""}
+  `;
+}
+
+function renderPricePanel() {
+  const s=S.selPrice;
+  const groups={};
+  S.hist.forEach(h=>{const k=`${h.city}·${h.supplier_name}`;if(!groups[k])groups[k]=[];groups[k].push(h);});
+  return `<div class="upanel">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+      <div class="upanel-title">${s.product}</div>
+      <button onclick="S.selPrice=null;S.hist=[];render()" style="background:none;border:none;color:var(--muted);font-size:20px;cursor:pointer;padding:0">×</button>
+    </div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px">
+      ${[s.density&&["Плотность",fmtI(s.density)+" г/м²"],s.width&&["Ширина",s.width+" м"],s.roll_length&&["Намотка",fmtI(s.roll_length)+" м"],s.thickness&&["Толщина",s.thickness+" мм"],s.material&&["Материал",s.material]].filter(Boolean).map(([l,v])=>`<div style="background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:6px 12px"><div style="font-size:9px;text-transform:uppercase;letter-spacing:1px;color:var(--muted)">${l}</div><div style="font-size:13px;font-weight:600;margin-top:2px">${v}</div></div>`).join("")}
+    </div>
+    ${Object.keys(groups).length===0?`<div style="color:var(--muted);font-size:12px">История загружается...</div>`:Object.entries(groups).map(([k,rows])=>`
+      <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:var(--muted);margin:10px 0 5px">${k}</div>
+      ${rows.map(r=>{const d=r.prev_price?r.price-r.prev_price:null;return`<div class="info-row"><span>${fmtD(r.price_date)}</span><span style="font-family:monospace;font-weight:600">${fmt(r.price)} р</span><span class="${d!=null&&d>0?"up":d!=null&&d<0?"dn":"eq"}">${d!=null&&Math.abs(d)>0.01?(d>0?"▲":"▼")+" "+fmt(Math.abs(d)):"—"}</span></div>`;}).join("")}`).join("")}
+  </div>`;
+}
+
+function renderUserPanel() {
+  const u=S.selUser;
+  return `<div class="upanel">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+      <div class="upanel-title">${u.name} ${roleBadge(u.role)}</div>
+      <button onclick="S.selUser=null;render()" style="background:none;border:none;color:var(--muted);font-size:20px;cursor:pointer;padding:0">×</button>
+    </div>
+    <div style="margin-bottom:14px">
+      <div style="font-size:11px;color:var(--muted);margin-bottom:7px;text-transform:uppercase;letter-spacing:.6px">Роль</div>
+      <div class="role-btns">
+        <button class="role-btn ${u.role==='snabzhenets'?'active-snab':''}" onclick="updateUserRole(${u.telegram_id},'snabzhenets')">📦 Снабженец</button>
+        <button class="role-btn ${u.role==='manager'?'active-man':''}" onclick="updateUserRole(${u.telegram_id},'manager')">🔍 Менеджер</button>
+        <button class="role-btn ${u.role==='admin'?'active-admin':''}" onclick="updateUserRole(${u.telegram_id},'admin')">⚙ Администратор</button>
+      </div>
+    </div>
+    <div class="field-row">
+      <label>Город</label>
+      <input id="ue-city" value="${u.city||""}" placeholder="Город">
+      <button class="save-btn" onclick="saveUserField(${u.telegram_id},'city','ue-city')">✓</button>
+    </div>
+    <div class="field-row">
+      <label>Поставщик</label>
+      <input id="ue-sup" value="${u.supplier_name||""}" placeholder="Название поставщика">
+      <button class="save-btn" onclick="saveUserField(${u.telegram_id},'supplier_name','ue-sup')">✓</button>
+    </div>
+    <div style="margin-top:12px;font-size:11px;color:var(--muted)">
+      TG ID: <span style="font-family:monospace">${u.telegram_id}</span>
+      ${u.username?` · @${u.username}`:""}
+      · Зарег. ${fmtD(u.created_at)}
+    </div>
+  </div>`;
+}
+
+function renderCfgModal() {
+  return `<div class="modal-bg" onclick="if(event.target.classList.contains('modal-bg')){S.showCfg=false;render()}">
+    <div class="modal">
+      <div class="modal-title">Подключение к Supabase</div>
+      <div class="modal-sub">Ключи из Railway Variables</div>
+      <label class="f-label">SUPABASE_URL</label>
+      <input class="f-input" id="cfgUrl" value="${S.sbUrl}" placeholder="https://xxxx.supabase.co">
+      <label class="f-label">SUPABASE_KEY (service_role)</label>
+      <input class="f-input" id="cfgKey" type="password" value="${S.sbKey}" placeholder="eyJhbGci...">
+      <div style="border-top:1px solid var(--border);padding-top:14px;margin-top:4px;margin-bottom:14px">
+        <label class="f-label">Пароль админки (ADMIN_PASSWORD)</label>
+        <input class="f-input" id="cfgPwd" type="password" placeholder="Из Railway или придумайте">
+        <div style="font-size:11px;color:var(--muted);margin-top:-8px">Сохранится локально в браузере</div>
+      </div>
+      <button class="btn-primary" onclick="saveCfg()">Сохранить</button>
+      <button class="btn-sec" onclick="S.showCfg=false;render()">Отмена</button>
+    </div>
+  </div>`;
+}
+
+// ── Event handlers ────────────────────────────────────────────────────────────
+function selPrice(i) {
+  const rows=getPriceRows(); const r=rows[i];
+  if (S.selPrice?.id===r.id){S.selPrice=null;S.hist=[];render();return;}
+  S.selPrice=r; S.hist=[]; render(); loadHist(r.product);
+}
+function selUser(i) {
+  const rows=getUserRows(); const u=rows[i];
+  if (S.selUser?.telegram_id===u.telegram_id){S.selUser=null;render();return;}
+  S.selUser=u; render();
+}
+function setRole(i,role) {
+  const rows=getUserRows(); updateUserRole(rows[i].telegram_id, role);
+}
+function saveUserField(tgId,field,inputId) {
+  const val=document.getElementById(inputId)?.value?.trim();
+  if(val!==undefined) updateUserField(tgId,field,val);
+}
+function showCfg(){S.showCfg=true;render();}
+function logout(){S.auth=false;S.adminPwd="";localStorage.removeItem("admin_pwd");render();}
+function saveCfg(){
+  const url=document.getElementById("cfgUrl")?.value?.trim();
+  const key=document.getElementById("cfgKey")?.value?.trim();
+  const pwd=document.getElementById("cfgPwd")?.value?.trim();
+  if(url){S.sbUrl=url;localStorage.setItem("sb_url",url);}
+  if(key){S.sbKey=key;localStorage.setItem("sb_key",key);}
+  if(pwd){localStorage.setItem("admin_secret",pwd);S.adminPwd=pwd;localStorage.setItem("admin_pwd",pwd);}
+  S.showCfg=false; loadAll();
+}
+
+function render() {
+  if (!S.auth) { renderLogin(); return; }
+  renderApp();
+}
+
+render();
+if (S.auth && S.sbUrl && S.sbKey) loadAll();
+</script>
+</body>
+</html>

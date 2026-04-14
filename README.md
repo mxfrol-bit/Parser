@@ -1,94 +1,57 @@
 # Снабженец — агрегатор прайсов геоматериалов
 
-Система сбора и поиска цен через Telegram-бот + веб-каталог.
+## Файлы
 
-## Стек
-
-| Слой | Технология |
+| Файл | Назначение |
 |---|---|
-| Бот | Python · aiogram 3 |
-| AI парсинг | OpenRouter · Gemini 2.0 Flash |
-| База данных | Supabase PostgreSQL |
-| Хостинг | Railway |
-| Веб-каталог | React (catalog.jsx) |
+| `bot.py` | Telegram-бот (Railway worker) |
+| `admin.html` | Веб-админка (открыть в браузере) |
+| `schema.sql` | SQL схема Supabase (вставить в SQL Editor) |
+| `requirements.txt` | Python зависимости |
+| `Procfile` | Railway — запуск бота |
+| `.env.example` | Переменные окружения |
 
-## Структура проекта
-
-```
-├── bot.py           # Telegram-бот (основной сервис)
-├── catalog.jsx      # Веб-каталог для менеджеров (React)
-├── schema.sql       # SQL схема Supabase
-├── requirements.txt
-├── Procfile         # Railway worker
-└── .env.example
-```
-
-## Быстрый старт
+## Деплой
 
 ### 1. Supabase
-1. Создать проект → [supabase.com](https://supabase.com)
-2. SQL Editor → вставить и запустить `schema.sql`
-3. Settings → API → скопировать **Project URL** и **service_role** secret
+SQL Editor → вставить `schema.sql` целиком → Run
 
-### 2. Telegram
-1. [@BotFather](https://t.me/botfather) → `/newbot` → скопировать токен
-
-### 3. OpenRouter
-1. [openrouter.ai](https://openrouter.ai) → Keys → создать ключ
-2. По умолчанию используется `google/gemini-2.0-flash-001` (быстро, дёшево, есть vision)
-3. Поменять модель через переменную `MODEL` в Railway
-
-### 4. Railway
-1. Новый проект → подключить GitHub
-2. Variables → добавить из `.env.example`:
-   - `BOT_TOKEN`
-   - `OPENROUTER_KEY`
-   - `SUPABASE_URL`
-   - `SUPABASE_KEY`
-3. Railway автоматически запустит `Procfile`
-
-### 5. Веб-каталог
-`catalog.jsx` — деплоить на Vercel/Railway как отдельный Next.js/Vite проект,
-или открыть прямо в Claude как React артефакт.
-
-При открытии нажать ⚙ Supabase и ввести **Project URL** + **anon key** (не service_role).
-
-## Роли пользователей
-
-| Роль | Что делает |
-|---|---|
-| **snabzhenets** | Загружает прайсы: Excel / фото / PDF / текст |
-| **manager** | Ищет цены: пишет название товара |
-
-Регистрация через `/start` → выбор роли → город.
-
-## AI парсер извлекает
-
-- `product` — нормализованное название
-- `category` — геотекстиль | георешетка | геомембрана | дренаж | спанбонд
-- `density` — плотность г/м²
-- `width` — ширина рулона, м
-- `roll_length` — намотка, м
-- `thickness` — толщина мм (для мембран)
-- `material` — PP, PET, HDPE, ПВД...
-- `price_date` — дата прайса (ищет в заголовке, иначе сегодня)
-- `price_per_roll` — цена за рулон
-
-## База данных
-
+### 2. Railway Variables
 ```
-prices        — вся история (никогда не перезаписывается)
-prices_latest — вью: последняя цена от каждого снабженца
-prices_history — вью: история с дельтой к предыдущей записи
-users          — снабженцы и менеджеры
+BOT_TOKEN       = от @BotFather
+OPENROUTER_KEY  = sk-or-v1-...
+ANTHROPIC_KEY   = sk-ant-api03-...
+SUPABASE_URL    = https://xxxx.supabase.co
+SUPABASE_KEY    = eyJhbGci... (service_role)
+ADMIN_IDS       = ваш_telegram_id
 ```
 
-## Команды бота
+### 3. admin.html
+Открыть в браузере → ⚙ Supabase → ввести URL + KEY + пароль
+
+## Роли
+
+| Роль | Бот | Команды |
+|---|---|---|
+| snabzhenets | Загружает прайсы | /setcity /setsupplier /myinfo |
+| manager | Ищет цены | поиск текстом |
+| admin | Всё выше + управление | /users /setrole |
+
+## Пайплайн загрузки Excel
+
+1. Python читает все листы → 122+ строк
+2. Claude AI нормализует названия, извлекает характеристики
+3. Supabase сохраняет с историей
+
+## Ответ менеджеру
 
 ```
-/start          — регистрация
-/history <товар> [город]   — история цен
-```
+🥇 Нижний Новгород — 26.79 р/м²
+  плотность 200 г/м² · рулон 4.5м × 50м
+  💰 6 028 р/рул
+  ⚖️ ~45 кг/рул
+  🏢 ООО Армпласт · 📅 01.02.2026
 
-Снабженец — просто отправить файл или текст.
-Менеджер — написать название товара.
+[📈 НН] [📈 Казань] [📈 Самара]
+[🔄 Обновить] [🌍 Все города]
+```
