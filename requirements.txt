@@ -1,0 +1,6 @@
+aiogram==3.7.0
+openai>=1.30.0
+supabase>=2.4.0
+pandas>=2.0.0
+openpyxl>=3.1.0
+python-dotenv>=1.0.0
