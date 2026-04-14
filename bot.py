@@ -57,36 +57,57 @@ class Edit(StatesGroup):
 # ── AI prompts ─────────────────────────────────────────────────────────────────
 TODAY = str(date.today())
 
-VALIDATE_PROMPT = """Ты — валидатор прайс-листов геоматериалов.
-Получишь JSON-массив сырых строк извлечённых из Excel.
-Твоя задача: нормализовать, проверить и дополнить каждую строку.
-
+VALIDATE_PROMPT = """Ты — валидатор и обогатитель прайс-листов геоматериалов.
+Получишь JSON-массив сырых строк из Excel. Нормализуй и максимально заполни каждое поле.
 Ответь ТОЛЬКО валидным JSON-массивом без markdown:
+
 [{
-  "product":       "геотекстиль 200 г/м²",
+  "product":       "геотекстиль иглопробивной 200 г/м²",
   "category":      "геотекстиль",
+  "technology":    "иглопробивной",
   "density":       200,
   "width":         4.5,
   "roll_length":   50,
   "thickness":     null,
   "color":         null,
-  "material":      "ПЭ",
+  "material":      "ПЭТ",
+  "tolerance":     "±15%",
+  "application":   null,
   "price":         26.79,
   "unit":          "м²",
   "price_per_roll": 6032.55,
   "price_date":    "2026-02-01",
-  "original":      "Геотекстиль \"Пошхим\"  200"
+  "original":      "Геотекстиль Пошхим 200"
 }]
 
-Правила:
-- product: нижний регистр, без кавычек и торговых марок → "геотекстиль 200 г/м²"
-- density: извлеки из названия (80, 100, 150, 200...) или null
-- material: из названия (ПЭ→ПЭ, PP→PP, HDPE, ПВД...) или null
-- thickness: для мембран в мм, иначе null
-- price_per_roll: price × width × roll_length (если оба есть), иначе null
-- price_date: подставь дату из контекста если передана, иначе сегодня
-- НЕ добавляй строки которых не было, НЕ меняй цены
-- ПРОПУСТИ строки с ценой 0 или без названия"""
+ПРАВИЛА:
+product: нижний регистр, без торговых марок в кавычках, включай технологию если известна
+  ✓ "геотекстиль иглопробивной 200 г/м²"
+  ✗ "геотекстиль пошхим 200"
+
+technology — выводи из названия raw_name:
+  слова: иглопробивной, термосклеенный, термоскреплённый, тканый, каландрированный,
+         экструзионный, гладкая, профилированная, растянутая, сварная → заполняй
+  Если не указано явно → null (не угадывай)
+
+material — определяй по категории и названию:
+  Иглопробивной геотекстиль → обычно ПЭТ или смесь ПП+ПЭТ
+  Термосклеенный геотекстиль → обычно ПП
+  Спанбонд → ПП
+  Геомембрана ПВД → LDPE/ПВД
+  Геомембрана HDPE → HDPE
+  Если не уверен → null
+
+tolerance: ищи в оригинале: "±15%", "до 15%", "±5 г/м²" → заполняй строкой
+  null если нет
+
+category: геотекстиль | георешетка | геомембрана | дренаж | спанбонд | ватин | термовойлок | прочее
+density: число г/м² из названия
+width, roll_length: из данных Excel (не меняй)
+thickness: мм для мембран
+price_per_roll: price × width × roll_length если оба есть, иначе null
+price_date: используй переданную дату
+НЕ меняй цены. НЕ добавляй несуществующие строки."""
 
 
 def python_normalize(raw_rows: list[dict], price_date: str) -> list[dict]:
@@ -421,41 +442,72 @@ def parse_excel_direct(raw_bytes: bytes, price_date: str = None) -> list[dict]:
 
     return results
 
-PARSE_PROMPT = f"""Ты — парсер прайс-листов строительных материалов (геотекстиль, георешётка, геомембрана, спанбонд, дренаж и др.).
-
-Извлеки ВСЕ товарные позиции с ценами. Ответь ТОЛЬКО валидным JSON-массивом без markdown:
+PARSE_PROMPT = f"""Ты — парсер прайс-листов геоматериалов и технических тканей.
+Извлеки ВСЕ товарные позиции. Ответь ТОЛЬКО валидным JSON-массивом без markdown:
 
 [{{
-  "product":       "геотекстиль 200 г/м²",
+  "product":       "геотекстиль иглопробивной 200 г/м²",
   "category":      "геотекстиль",
+  "technology":    "иглопробивной",
   "density":       200,
   "width":         4.5,
   "roll_length":   150,
   "thickness":     null,
-  "color":         null,
-  "material":      "PP",
+  "color":         "чёрный",
+  "material":      "ПЭ",
+  "tolerance":     "±15%",
+  "application":   "дорожный",
   "price":         18.50,
   "unit":          "м²",
   "price_per_roll": 12487.5,
   "price_date":    "{TODAY}",
-  "original":      "Геотекстиль 200 г/кв.м — 18-50 руб"
+  "original":      "Геотекстиль 200 г/кв.м иглопробивной — 18.50 руб/м²"
 }}]
 
-Правила полей:
-- product: нижний регистр, нормализованное название с характеристиками
-- category: геотекстиль | георешетка | геомембрана | дренаж | спанбонд | прочее
-- density: плотность г/м² — число или null
-- width: ширина рулона в метрах — число или null
-- roll_length: намотка/длина рулона в метрах — число или null
-- thickness: толщина в мм (для мембран) — число или null
-- color: цвет (чёрный, белый...) или null
-- material: PP, PET, HDPE, ПВД... или null
-- price: цена числом без валюты и пробелов (18.50)
-- unit: м² | рулон | кг | шт | м.п. | пог.м (если непонятно → м²)
-- price_per_roll: цена за рулон если указана явно, иначе null
-- price_date: дата прайса YYYY-MM-DD — ищи в заголовке/колонтитуле, если нет → {TODAY}
-- original: строка как в источнике
-- ПРОПУСКАЙ строки с нулевой или отсутствующей ценой"""
+═══ ПРАВИЛА ПОЛЕЙ ═══
+
+product: нижний регистр, включает технологию и плотность
+  пример: "геотекстиль иглопробивной 200 г/м²", "геомембрана пвд 1.0 мм гладкая"
+
+category: геотекстиль | георешетка | геомембрана | дренаж | спанбонд | ватин | термовойлок | прочее
+
+technology — технология производства, определяй из названия/описания:
+  Геотекстиль: иглопробивной | термосклеенный | термоскреплённый | тканый | вязаный | каландрированный | экструзионный
+  Геомембрана: гладкая | профилированная | текстурированная | армированная
+  Георешетка: растянутая | сварная | экструзионная
+  Спанбонд/ватин: термосклеенный | иглопробивной
+  Если не указана → null
+
+material — сырьё:
+  ПП / PP — полипропилен (спанбонд, часть геотекстиля)
+  ПЭ / PE — полиэтилен (геомембраны ПВД/ПНД, часть геотекстиля)
+  ПЭТ / PET — полиэтилентерефталат (иглопробивной геотекстиль)
+  HDPE — полиэтилен высокой плотности (мембраны HDPE)
+  LDPE / ПВД — полиэтилен низкой плотности (мембраны ПВД)
+  Смесь ПП+ПЭТ, Смесь ПП+ПЭ — если явно указано
+  null — если неизвестно
+
+color: чёрный | белый | серый | зелёный | синий | … или null
+
+tolerance: погрешность/допуск по плотности если указан
+  пример: "±15%", "до 15%", "±5%"
+  null — если не указан
+
+application: область применения если указана:
+  дорожный | садовый | строительный | гидроизоляционный | дренажный | геотехнический | универсальный
+  null — если не указана
+
+density: г/м² числом или null
+width: ширина рулона в метрах числом или null
+roll_length: намотка в метрах числом или null
+thickness: толщина мм (для мембран) числом или null
+price: число без валюты (18.50)
+unit: м² | рулон | кг | шт | м.п. — если непонятно → м²
+price_per_roll: цена за рулон если указана явно, иначе null
+price_date: YYYY-MM-DD из заголовка прайса, иначе {TODAY}
+original: строка как в источнике
+
+ПРОПУСКАЙ строки с ценой 0 или без цены."""
 
 NORMALIZE_PROMPT = """Нормализуй поисковый запрос для базы строительных геоматериалов.
 Исправь опечатки, раскрой сокращения, добавь характеристики если понятны.
@@ -530,12 +582,15 @@ async def save_prices(items: list, user: dict, source: str = None) -> int:
             "product":          item.get("product", "").lower().strip(),
             "product_original": item.get("original", item.get("product", "")),
             "category":         item.get("category"),
+            "technology":       item.get("technology"),
             "density":          item.get("density"),
             "width":            item.get("width"),
             "roll_length":      item.get("roll_length"),
             "thickness":        item.get("thickness"),
             "color":            item.get("color"),
             "material":         item.get("material"),
+            "tolerance":        item.get("tolerance"),
+            "application":      item.get("application"),
             "price":            price,
             "unit":             item.get("unit", "м²"),
             "price_per_roll":   ppr,
@@ -611,16 +666,23 @@ def fmt_result(items: list, query: str, norm: str) -> tuple:
         sup = item.get("supplier_name") or "—"
 
         attrs = []
+        if item.get("technology"):
+            attrs.append(item["technology"])
         if item.get("density"):
-            attrs.append(f'плотность {item["density"]} г/м²')
+            tol = f' {item["tolerance"]}' if item.get("tolerance") else ""
+            attrs.append(f'{item["density"]} г/м²{tol}')
         if item.get("width") and item.get("roll_length"):
-            attrs.append(f'рулон {item["width"]}м × {int(item["roll_length"])}м')
+            attrs.append(f'рул. {item["width"]}м × {int(item["roll_length"])}м')
         elif item.get("width"):
-            attrs.append(f'ширина {item["width"]} м')
+            attrs.append(f'ш. {item["width"]} м')
         elif item.get("roll_length"):
-            attrs.append(f'намотка {int(item["roll_length"])} м')
+            attrs.append(f'нам. {int(item["roll_length"])} м')
         if item.get("thickness"):
-            attrs.append(f'толщина {item["thickness"]} мм')
+            attrs.append(f'{item["thickness"]} мм')
+        if item.get("material"):
+            attrs.append(item["material"])
+        if item.get("color"):
+            attrs.append(item["color"])
 
         d  = item.get("density")
         w  = item.get("width")
