@@ -701,12 +701,13 @@ def ok_msg(count: int, city: str, price_date: str = None) -> str:
 async def cmd_start(msg: Message, state: FSMContext):
     user = await get_user(msg.from_user.id)
     if user:
-        role_label = "Снабженец" if user["role"] == "snabzhenets" else "Менеджер"
+        role_label = {"snabzhenets":"📦 Снабженец","manager":"🔍 Менеджер","admin":"⚙ Администратор"}.get(user["role"], user["role"])
         tip = "Отправляйте прайсы — файл, фото или текст." if user["role"] == "snabzhenets" \
               else "Напишите название товара для поиска цены."
         await msg.answer(
-            f"Вы в системе как *{role_label}* ({user['city']}).\n\n{tip}",
-            parse_mode="Markdown"
+            f"Вы в системе как *{role_label}* ({user['city']}).\n\n{tip}\n\n_/myinfo — профиль и смена роли_",
+            parse_mode="Markdown",
+            reply_markup=profile_kb(user["role"]),
         )
         return
 
@@ -784,23 +785,76 @@ async def reg_supplier(msg: Message, state: FSMContext):
 
 # ── /myinfo, /setcity, /setsupplier commands ──────────────────────────────────
 
+def profile_kb(role: str) -> InlineKeyboardMarkup:
+    """Кнопки профиля с переключением роли."""
+    other_role = "manager" if role == "snabzhenets" else "snabzhenets"
+    other_label = "🔍 Стать менеджером" if other_role == "manager" else "📦 Стать снабженцем"
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=other_label, callback_data=f"switchrole:{other_role}")],
+        [
+            InlineKeyboardButton(text="📍 Сменить город",      callback_data="edit:city"),
+            InlineKeyboardButton(text="🏢 Сменить поставщика", callback_data="edit:supplier"),
+        ],
+    ])
+
+
 @router.message(F.text == "/myinfo")
 async def cmd_myinfo(msg: Message):
     user = await get_user(msg.from_user.id)
     if not user:
         await msg.answer("Начните с /start")
         return
-    role = "Снабженец" if user["role"] == "snabzhenets" else "Менеджер"
-    sup  = user.get("supplier_name") or "не указан"
+    role_label = {"snabzhenets": "📦 Снабженец", "manager": "🔍 Менеджер", "admin": "⚙ Администратор"}.get(user["role"], user["role"])
+    sup  = user.get("supplier_name") or "—"
     await msg.answer(
         f"👤 *Ваш профиль*\n\n"
-        f"Роль: {role}\n"
+        f"Роль: {role_label}\n"
         f"Город: {user['city']}\n"
-        f"Поставщик: {sup}\n\n"
-        "_/setcity — сменить город_\n"
-        "_/setsupplier — сменить поставщика_",
+        f"Поставщик: {sup}\n",
         parse_mode="Markdown",
+        reply_markup=profile_kb(user["role"]),
     )
+
+
+@router.callback_query(F.data.startswith("switchrole:"))
+async def cb_switchrole(cb: CallbackQuery):
+    new_role = cb.data.split(":")[1]
+    if new_role not in ("snabzhenets", "manager"):
+        await cb.answer("Недопустимая роль"); return
+
+    user = await get_user(cb.from_user.id)
+    if not user:
+        await cb.answer("Сначала /start"); return
+
+    # Если переключается в снабженца — проверить supplier_name
+    if new_role == "snabzhenets" and not user.get("supplier_name"):
+        await cb.answer("Сначала укажите поставщика: /setsupplier", show_alert=True)
+        return
+
+    supabase.table("users").update({"role": new_role}).eq("telegram_id", cb.from_user.id).execute()
+    await cb.answer("Роль изменена!")
+
+    role_label = "📦 Снабженец" if new_role == "snabzhenets" else "🔍 Менеджер"
+    tip = "Отправляйте прайсы — файл, фото или текст." if new_role == "snabzhenets" else "Напишите название товара для поиска цены."
+    await cb.message.edit_text(
+        f"✅ Роль изменена на *{role_label}*\n\n{tip}",
+        parse_mode="Markdown",
+        reply_markup=profile_kb(new_role),
+    )
+
+
+@router.callback_query(F.data == "edit:city")
+async def cb_edit_city(cb: CallbackQuery, state: FSMContext):
+    await cb.answer()
+    await cb.message.answer("Введите новый город:")
+    await state.set_state(Edit.city)
+
+
+@router.callback_query(F.data == "edit:supplier")
+async def cb_edit_supplier(cb: CallbackQuery, state: FSMContext):
+    await cb.answer()
+    await cb.message.answer("Введите название поставщика:")
+    await state.set_state(Edit.supplier)
 
 
 @router.message(F.text.startswith("/setcity"))
