@@ -382,8 +382,21 @@ async def on_document(msg: Message):
         fname = msg.document.file_name or "price"
 
         if fname.lower().endswith((".xlsx", ".xls")):
-            df      = pd.read_excel(BytesIO(raw.read()))
-            content = df.to_string(index=False)
+            xl    = pd.ExcelFile(BytesIO(raw.read()))
+            skip  = {"содержание", "оглавление", "для формирования цены", "contents"}
+            parts = []
+            for sheet in xl.sheet_names:
+                if sheet.lower().strip() in skip:
+                    continue
+                try:
+                    df = pd.read_excel(xl, sheet_name=sheet, header=None)
+                    df = df.dropna(how="all").dropna(axis=1, how="all")
+                    if df.empty:
+                        continue
+                    parts.append(f"=== {sheet} ===\n{df.to_string(index=False, header=False)}")
+                except Exception:
+                    continue
+            content = "\n\n".join(parts)
         elif fname.lower().endswith(".csv"):
             df      = pd.read_csv(BytesIO(raw.read()), encoding="utf-8-sig")
             content = df.to_string(index=False)
