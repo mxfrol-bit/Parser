@@ -11,6 +11,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
+import anthropic
 from supabase import create_client
 
 load_dotenv()
@@ -22,6 +23,7 @@ SUPABASE_KEY   = os.getenv("SUPABASE_KEY")
 
 MODEL_TEXT   = os.getenv("MODEL", "google/gemini-2.0-flash-001")
 MODEL_VISION = os.getenv("MODEL_VISION", "google/gemini-2.0-flash-001")
+MODEL_CLAUDE = os.getenv("MODEL_CLAUDE", "claude-haiku-4-5-20251001")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -36,6 +38,10 @@ ai       = AsyncOpenAI(
     base_url="https://openrouter.ai/api/v1",
     default_headers={"X-Title": "Snabzhenets Bot"},
 )
+
+# Anthropic — для AI валидации прайсов
+ANTHROPIC_KEY = os.getenv("ANTHROPIC_KEY")
+claude = anthropic.AsyncAnthropic(api_key=ANTHROPIC_KEY) if ANTHROPIC_KEY else None
 
 # ── States ─────────────────────────────────────────────────────────────────────
 class Reg(StatesGroup):
@@ -77,25 +83,92 @@ VALIDATE_PROMPT = """Ты — валидатор прайс-листов гео�
 - ПРОПУСТИ строки с ценой 0 или без названия"""
 
 
-async def ai_validate(raw_rows: list[dict], price_date: str) -> list[dict]:
-    """Шаг 2: AI проверяет и нормализует данные от Python-парсера."""
-    # Батчи по 80 строк чтобы не превысить контекст
-    BATCH = 80
+def python_normalize(raw_rows: list[dict], price_date: str) -> list[dict]:
+    """Python-нормализация без AI — фоллбек если AI недоступен."""
+    import re
     result = []
+    for row in raw_rows:
+        name = row.get("raw_name", "")
+        # Убрать торговые марки в кавычках
+        product = re.sub(r'["\'«»][^"\'«»]+["\'«»]', "", name).strip().lower()
+        product = re.sub(r"\s+", " ", product).strip()
+        # Плотность из имени
+        m = re.search(r"(\d+(?:\.\d+)?)\s*(?:г/м[²2])?\s*$", name.strip())
+        density = float(m.group(1)) if m else None
+        w  = row.get("width")
+        rl = row.get("roll_length")
+        p  = row.get("price")
+        result.append({
+            "product":          product or name.lower().strip(),
+            "product_original": name,
+            "category":         row.get("category"),
+            "density":          density,
+            "width":            w,
+            "roll_length":      rl,
+            "thickness":        None,
+            "color":            None,
+            "material":         None,
+            "price":            p,
+            "unit":             row.get("unit", "м²"),
+            "price_per_roll":   round(p * w * rl, 2) if (p and w and rl) else None,
+            "price_date":       price_date,
+            "original":         name,
+        })
+    return result
+
+
+async def ai_validate(raw_rows: list[dict], price_date: str) -> list[dict]:
+    """Шаг 2: AI проверяет и нормализует. При ошибке — Python фоллбек."""
+    BATCH = 60
+    result = []
+    ai_failed = False
+
     for i in range(0, len(raw_rows), BATCH):
+        if ai_failed:
+            # AI уже сломался — нормализуем Python-ом
+            result.extend(python_normalize(raw_rows[i:i + BATCH], price_date))
+            continue
+
         batch = raw_rows[i:i + BATCH]
         payload = json.dumps(batch, ensure_ascii=False)
-        r = await ai.chat.completions.create(
-            model=MODEL_TEXT,
-            messages=[
-                {"role": "system", "content": VALIDATE_PROMPT},
-                {"role": "user",   "content": f"price_date: {price_date}\n\n{payload}"},
-            ],
-            max_tokens=6000,
-            temperature=0,
-        )
-        raw = r.choices[0].message.content.strip().strip("```json").strip("```").strip()
-        result.extend(json.loads(raw))
+        try:
+            if claude:
+                # Claude через Anthropic SDK
+                r = await claude.messages.create(
+                    model=MODEL_CLAUDE,
+                    max_tokens=8000,
+                    system=VALIDATE_PROMPT,
+                    messages=[{"role": "user", "content": f"price_date: {price_date}\n\n{payload}"}],
+                )
+                raw_text = r.content[0].text.strip()
+            else:
+                # Фоллбек на OpenRouter
+                r = await ai.chat.completions.create(
+                    model=MODEL_TEXT,
+                    messages=[
+                        {"role": "system", "content": VALIDATE_PROMPT},
+                        {"role": "user",   "content": f"price_date: {price_date}\n\n{payload}"},
+                    ],
+                    max_tokens=8000,
+                    temperature=0,
+                )
+                raw_text = r.choices[0].message.content.strip()
+            # Очистка markdown-оберток
+            for fence in ["```json", "```"]:
+                raw_text = raw_text.replace(fence, "")
+            raw_text = raw_text.strip()
+            parsed = json.loads(raw_text)
+            result.extend(parsed)
+            log.info(f"AI validate batch {i//BATCH+1}: {len(parsed)} rows OK")
+        except json.JSONDecodeError as e:
+            log.warning(f"AI validate JSON error batch {i//BATCH+1}: {e} — fallback to Python")
+            ai_failed = True
+            result.extend(python_normalize(batch, price_date))
+        except Exception as e:
+            log.warning(f"AI validate error batch {i//BATCH+1}: {e} — fallback to Python")
+            ai_failed = True
+            result.extend(python_normalize(batch, price_date))
+
     return result
 
 
