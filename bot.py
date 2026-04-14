@@ -239,6 +239,22 @@ def python_parse_excel(raw_bytes: bytes) -> tuple[list[dict], str | None]:
     blocks = []      # список (sheet_name, text_block)
     found_date = None
 
+    # Сначала ищем дату в ЛЮБОМ листе включая содержание
+    for sheet in xl.sheet_names:
+        try:
+            df_tmp = pd.read_excel(xl, sheet_name=sheet, header=None)
+            for i in range(min(8, len(df_tmp))):
+                for val in df_tmp.iloc[i].values:
+                    if hasattr(val, "strftime"):
+                        found_date = val.strftime("%Y-%m-%d")
+                        break
+                if found_date:
+                    break
+        except Exception:
+            pass
+        if found_date:
+            break
+
     for sheet in xl.sheet_names:
         if sheet.lower().strip() in _SKIP_SHEETS:
             continue
@@ -246,16 +262,6 @@ def python_parse_excel(raw_bytes: bytes) -> tuple[list[dict], str | None]:
             df = pd.read_excel(xl, sheet_name=sheet, header=None)
         except Exception:
             continue
-
-        # Ищем дату в первых 5 строках
-        if not found_date:
-            for i in range(min(5, len(df))):
-                for val in df.iloc[i].values:
-                    if hasattr(val, "strftime"):
-                        found_date = val.strftime("%Y-%m-%d")
-                        break
-                if found_date:
-                    break
 
         # Убираем полностью пустые строки и столбцы
         df = df.dropna(how="all").dropna(axis=1, how="all")
@@ -273,19 +279,33 @@ def python_parse_excel(raw_bytes: bytes) -> tuple[list[dict], str | None]:
 async def ai_parse_sheet(sheet_name: str, text: str, price_date: str) -> list[dict]:
     """
     AI парсит ОДИН лист прайса любой структуры.
-    Батчи по 40 строк чтобы не обрывать JSON.
+    Батчи по 60 строк с перекрытием 10 строк для сохранения контекста.
     """
     lines = text.split("\n")
-    # Первые 2 строки — заголовок листа, оставляем всегда
+    # Первые строки — заголовок таблицы (имя листа + строка колонок)
     header = lines[:2]
     data_lines = lines[2:]
 
-    BATCH = 40
-    result = []
+    BATCH   = 60   # строк в батче
+    OVERLAP = 10   # перекрытие — последние N строк предыдущего батча
+    result  = []
+    prev_tail = []  # хвост предыдущего батча для контекста
 
-    for i in range(0, max(1, len(data_lines)), BATCH):
-        chunk = header + data_lines[i:i+BATCH]
-        chunk_text = "\n".join(chunk)
+    # Если данных мало — один запрос
+    if len(data_lines) <= BATCH:
+        chunks = [data_lines]
+    else:
+        chunks = []
+        i = 0
+        while i < len(data_lines):
+            chunks.append(data_lines[i:i+BATCH])
+            i += BATCH - OVERLAP
+
+    for batch_n, chunk in enumerate(chunks):
+        # Контекст: заголовок + хвост предыдущего батча + текущий батч
+        context = header + prev_tail + chunk
+        chunk_text = "\n".join(context)
+        prev_tail = chunk[-OVERLAP:] if len(chunk) >= OVERLAP else chunk
 
         prompt = f"""Ты парсишь прайс-лист. Лист называется "{sheet_name}".
 Дата прайса: {price_date}
@@ -356,12 +376,12 @@ async def ai_parse_sheet(sheet_name: str, text: str, price_date: str) -> list[di
 
             parsed = json.loads(raw_text)
             result.extend(parsed)
-            log.info(f"  Sheet '{sheet_name}' batch {i//BATCH+1}: {len(parsed)} rows")
+            log.info(f"  Sheet '{sheet_name}' batch {batch_n+1}/{len(chunks)}: {len(parsed)} rows")
 
         except json.JSONDecodeError as e:
-            log.warning(f"  Sheet '{sheet_name}' batch {i//BATCH+1} JSON error: {e}")
+            log.warning(f"  Sheet '{sheet_name}' batch {batch_n+1} JSON error: {e} | raw={raw_text[:200]}")
         except Exception as e:
-            log.warning(f"  Sheet '{sheet_name}' batch {i//BATCH+1} error: {e}")
+            log.warning(f"  Sheet '{sheet_name}' batch {batch_n+1} error: {e}")
 
     return result
 
@@ -1076,10 +1096,13 @@ async def on_document(msg: Message):
 
             # Шаг 2: AI парсит каждый лист независимо
             all_items = []
+            sheet_counts = []
             for sheet_name, text in blocks:
                 sheet_items = await ai_parse_sheet(sheet_name, text, price_date or TODAY)
                 all_items.extend(sheet_items)
+                sheet_counts.append(f"{sheet_name}: {len(sheet_items)}")
                 log.info(f"Sheet '{sheet_name}': {len(sheet_items)} items")
+            log.info(f"Total: {len(all_items)} | " + " | ".join(sheet_counts))
 
             if not all_items:
                 await msg.answer("❌ AI не смог извлечь позиции. Попробуйте ещё раз.")
