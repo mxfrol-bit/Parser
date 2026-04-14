@@ -126,18 +126,21 @@ def python_normalize(raw_rows: list[dict], price_date: str) -> list[dict]:
         rl = row.get("roll_length")
         p  = row.get("price")
         result.append({
-            "product":          product or name.lower().strip(),
+            "product":          row.get("product") or product or name.lower().strip(),
             "product_original": name,
             "category":         row.get("category"),
+            "technology":       row.get("technology"),
             "density":          density,
-            "width":            w,
-            "roll_length":      rl,
-            "thickness":        None,
-            "color":            None,
-            "material":         None,
+            "width":            row.get("width") if row.get("width") is not None else w,
+            "roll_length":      row.get("roll_length") if row.get("roll_length") is not None else rl,
+            "thickness":        row.get("thickness"),
+            "color":            row.get("color"),
+            "material":         row.get("material"),
+            "tolerance":        row.get("tolerance"),
+            "application":      row.get("application"),
             "price":            p,
             "unit":             row.get("unit", "м²"),
-            "price_per_roll":   round(p * w * rl, 2) if (p and w and rl) else None,
+            "price_per_roll":   row.get("price_per_roll") or (round(p * w * rl, 2) if (p and w and rl) else None),
             "price_date":       price_date,
             "original":         name,
         })
@@ -228,12 +231,12 @@ def _density(name: str):
 
 def python_parse_excel(raw_bytes: bytes) -> tuple[list[dict], str | None]:
     """
-    Шаг 1: Python структурно вытаскивает все строки с ценами.
-    Возвращает (raw_rows, price_date).
-    raw_rows — «сырые» данные, ещё не нормализованные.
+    Шаг 1: Python читает Excel и конвертирует каждый лист в текст.
+    Не делает никаких предположений о структуре — просто извлекает данные.
+    Возвращает (raw_rows_as_text_blocks, price_date).
     """
     xl = pd.ExcelFile(BytesIO(raw_bytes))
-    rows = []
+    blocks = []      # список (sheet_name, text_block)
     found_date = None
 
     for sheet in xl.sheet_names:
@@ -244,9 +247,7 @@ def python_parse_excel(raw_bytes: bytes) -> tuple[list[dict], str | None]:
         except Exception:
             continue
 
-        category = _CAT_MAP.get(sheet.lower().strip(), "прочее")
-
-        # Дата в первых 5 строках
+        # Ищем дату в первых 5 строках
         if not found_date:
             for i in range(min(5, len(df))):
                 for val in df.iloc[i].values:
@@ -256,54 +257,116 @@ def python_parse_excel(raw_bytes: bytes) -> tuple[list[dict], str | None]:
                 if found_date:
                     break
 
-        # Найти строку заголовков
-        header_row = width_col = roll_col = price_col = None
-        for i, row in df.iterrows():
-            row_str = " ".join(str(v) for v in row.values if pd.notna(v))
-            if "Ширина" in row_str and ("Намотк" in row_str or "намотк" in row_str):
-                header_row = i
-                for j, val in enumerate(row.values):
-                    s = str(val).lower() if pd.notna(val) else ""
-                    if "ширина" in s and width_col is None:  width_col = j
-                    elif "намотк" in s and roll_col is None: roll_col  = j
-                    elif "дилер" in s and price_col is None: price_col = j
-                if width_col  is None: width_col  = 3
-                if roll_col   is None: roll_col   = 4
-                if price_col  is None: price_col  = 10
-                break
-
-        if header_row is None:
+        # Убираем полностью пустые строки и столбцы
+        df = df.dropna(how="all").dropna(axis=1, how="all")
+        if df.empty:
             continue
 
-        cur_name = None
-        for i in range(header_row + 1, len(df)):
-            row = df.iloc[i]
-            nv = row.iloc[0] if pd.notna(row.iloc[0]) else None
-            if nv and str(nv).strip() not in ("nan", ""):
-                cur_name = str(nv).strip()
+        # Конвертируем в читаемый текст с заголовком листа
+        text = f"=== Лист: {sheet} ===\n"
+        text += df.to_string(index=False, header=False, na_rep="")
+        blocks.append((sheet, text))
 
-            if not cur_name:
-                continue
-            try:
-                width  = float(row.iloc[width_col])  if pd.notna(row.iloc[width_col])  else None
-                roll   = float(row.iloc[roll_col])   if pd.notna(row.iloc[roll_col])   else None
-                price  = float(row.iloc[price_col])  if pd.notna(row.iloc[price_col])  else None
-            except (ValueError, TypeError, IndexError):
-                continue
+    return blocks, found_date
 
-            if not price or price <= 0 or (width is None and roll is None):
-                continue
 
-            rows.append({
-                "raw_name": cur_name,
-                "category": category,
-                "width":    width,
-                "roll_length": roll,
-                "price":    price,
-                "unit":     "м²",
-            })
+async def ai_parse_sheet(sheet_name: str, text: str, price_date: str) -> list[dict]:
+    """
+    AI парсит ОДИН лист прайса любой структуры.
+    Батчи по 40 строк чтобы не обрывать JSON.
+    """
+    lines = text.split("\n")
+    # Первые 2 строки — заголовок листа, оставляем всегда
+    header = lines[:2]
+    data_lines = lines[2:]
 
-    return rows, found_date
+    BATCH = 40
+    result = []
+
+    for i in range(0, max(1, len(data_lines)), BATCH):
+        chunk = header + data_lines[i:i+BATCH]
+        chunk_text = "\n".join(chunk)
+
+        prompt = f"""Ты парсишь прайс-лист. Лист называется "{sheet_name}".
+Дата прайса: {price_date}
+
+Извлеки ВСЕ товарные позиции с ценами из таблицы ниже.
+Если строка — продолжение предыдущего товара (другой размер/вариант) — создай отдельную запись.
+
+Ответь ТОЛЬКО валидным JSON-массивом без markdown, комментариев и пояснений:
+[{{
+  "product": "геотекстиль иглопробивной 200 г/м²",
+  "category": "геотекстиль",
+  "technology": "иглопробивной",
+  "density": 200,
+  "width": 4.5,
+  "roll_length": 50,
+  "thickness": null,
+  "color": null,
+  "material": "ПЭТ",
+  "tolerance": "до 15%",
+  "application": null,
+  "price": 26.79,
+  "unit": "м²",
+  "price_per_roll": 6032.55,
+  "price_date": "{price_date}",
+  "original": "Геотекстиль Пошхим 200"
+}}]
+
+ПРАВИЛА:
+- product: нижний регистр, без торговых марок в кавычках
+- category: геотекстиль|георешетка|геомембрана|дренаж|спанбонд|ватин|термовойлок|анкер|прочее
+- technology: иглопробивной|термосклеенный|каландрированный|сварная|гладкая|п-образный|г-образный|null
+- material: ПЭ|ПЭТ|ПП|HDPE|LDPE|ПВД|сталь|null
+- tolerance: строка вида "±15%" или "до 15%" или null
+- density: г/м² числом или null
+- width: ширина в метрах или диаметр в мм для анкеров или null
+- roll_length: намотка в метрах или длина в мм для анкеров или null
+- thickness: толщина в мм или null
+- price: ДИЛЕРСКАЯ цена (последняя колонка с ценой, минимальная, наибольший объём) — число
+- unit: м²|м.п.|рулон|кг|шт — определи из контекста
+- price_per_roll: цена за рулон если можно вычислить = price × width × roll_length, иначе null
+- ПРОПУСКАЙ строки без цены, заголовки, пустые строки
+- НЕ придумывай данные которых нет в таблице
+
+ТАБЛИЦА:
+{chunk_text}"""
+
+        try:
+            if claude:
+                r = await claude.messages.create(
+                    model=MODEL_CLAUDE,
+                    max_tokens=4000,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                raw_text = r.content[0].text.strip()
+            else:
+                r = await ai.chat.completions.create(
+                    model=MODEL_TEXT,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=4000,
+                    temperature=0,
+                )
+                raw_text = r.choices[0].message.content.strip()
+
+            # Очистка
+            for fence in ["```json", "```"]:
+                raw_text = raw_text.replace(fence, "")
+            raw_text = raw_text.strip()
+
+            parsed = json.loads(raw_text)
+            result.extend(parsed)
+            log.info(f"  Sheet '{sheet_name}' batch {i//BATCH+1}: {len(parsed)} rows")
+
+        except json.JSONDecodeError as e:
+            log.warning(f"  Sheet '{sheet_name}' batch {i//BATCH+1} JSON error: {e}")
+        except Exception as e:
+            log.warning(f"  Sheet '{sheet_name}' batch {i//BATCH+1} error: {e}")
+
+    return result
+
+
+
 
 
 
@@ -998,21 +1061,32 @@ async def on_document(msg: Message):
         if fname.lower().endswith((".xlsx", ".xls")):
             raw_bytes = raw.read()
 
-            # Шаг 1: Python структурно вытаскивает все строки
-            await msg.answer("📊 Шаг 1/2: Python читает структуру файла...")
-            raw_rows, price_date = python_parse_excel(raw_bytes)
+            # Шаг 1: Python читает Excel → список текстовых блоков по листам
+            await msg.answer("📊 Читаю файл...")
+            blocks, price_date = python_parse_excel(raw_bytes)
 
-            if not raw_rows:
-                await msg.answer("❌ Не удалось найти таблицу с ценами. Проверьте формат файла.")
+            if not blocks:
+                await msg.answer("❌ Не удалось прочитать файл. Попробуйте Excel или CSV.")
                 return
 
-            await msg.answer(f"✅ Найдено строк: {len(raw_rows)}\n⏳ Шаг 2/2: AI проверяет и нормализует...")
+            await msg.answer(
+                f"✅ Листов: {len(blocks)}\n"
+                f"⏳ AI разбирает структуру и извлекает позиции...",
+            )
 
-            # Шаг 2: AI валидирует и нормализует
-            items = await ai_validate(raw_rows, price_date or TODAY)
+            # Шаг 2: AI парсит каждый лист независимо
+            all_items = []
+            for sheet_name, text in blocks:
+                sheet_items = await ai_parse_sheet(sheet_name, text, price_date or TODAY)
+                all_items.extend(sheet_items)
+                log.info(f"Sheet '{sheet_name}': {len(sheet_items)} items")
+
+            if not all_items:
+                await msg.answer("❌ AI не смог извлечь позиции. Попробуйте ещё раз.")
+                return
 
             # Шаг 3: сохраняем в базу
-            count = await save_prices(items, user, fname)
+            count = await save_prices(all_items, user, fname)
             await msg.answer(ok_msg(count, user["city"], price_date), parse_mode="Markdown")
             return
         elif fname.lower().endswith(".csv"):
@@ -1030,8 +1104,8 @@ async def on_document(msg: Message):
         await msg.answer("❌ Нейронка не смогла разобрать структуру.\n"
                          "Попробуйте Excel или CSV с чёткими колонками.")
     except Exception as e:
-        log.error(f"document error: {e}")
-        await msg.answer("❌ Ошибка обработки файла.")
+        log.error(f"document error: {e}", exc_info=True)
+        await msg.answer(f"❌ Ошибка: {str(e)[:200]}")
 
 # ── Photo ──────────────────────────────────────────────────────────────────────
 @router.message(F.photo)
