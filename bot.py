@@ -47,6 +47,26 @@ ai       = AsyncOpenAI(
 claude = anthropic.AsyncAnthropic(api_key=ANTHROPIC_KEY) if ANTHROPIC_KEY else None
 
 TODAY = str(date.today())
+
+# Кэш коротких ключей для callback_data (обходим лимит 64 байта)
+_QUERY_CACHE: dict[str, str] = {}
+_CACHE_CTR = 0
+
+def cache_query(q: str) -> str:
+    """Сохраняет запрос, возвращает короткий ключ max 8 символов."""
+    global _CACHE_CTR
+    # Ищем уже существующий
+    for k, v in _QUERY_CACHE.items():
+        if v == q:
+            return k
+    _CACHE_CTR += 1
+    key = f"q{_CACHE_CTR}"
+    _QUERY_CACHE[key] = q
+    return key
+
+def get_query(key: str) -> str:
+    """Восстанавливает запрос по ключу."""
+    return _QUERY_CACHE.get(key, key)
 _SKIP_SHEETS = {"содержание", "оглавление", "для формирования цены", "contents", "sheet1"}
 _CAT_MAP = {
     "геотекстиль эко":"геотекстиль","геотекстиль":"геотекстиль",
@@ -373,23 +393,25 @@ async def clarify_if_needed(msg: Message, query: str, items: list, norm: str) ->
     # Не больше 6 кнопок
     variant_keys = list(variants.keys())[:6]
 
-    # Строим inline keyboard с вариантами
+    # Строим inline keyboard — используем кэш для коротких ключей
     buttons = []
     row = []
     for i, key in enumerate(variant_keys):
         full_query = f"{norm} {key}" if key not in norm else norm
+        qkey = cache_query(full_query)          # короткий ключ вместо полного запроса
         row.append(InlineKeyboardButton(
             text=key,
-            callback_data=f"search:{full_query[:38]}"
+            callback_data=f"sq:{qkey}"          # sq = search-query, максимум ~12 байт
         ))
         if len(row) == 2 or i == len(variant_keys) - 1:
             buttons.append(row)
             row = []
 
-    # Добавить кнопку "Показать все"
+    # Кнопка "Показать все"
+    all_key = cache_query(norm)
     buttons.append([InlineKeyboardButton(
         text=f"📦 Все варианты ({len(products)})",
-        callback_data=f"search:{norm[:38]}"
+        callback_data=f"sq:{all_key}"
     )])
 
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -465,8 +487,8 @@ def fmt_result(items: list, query: str, norm: str) -> tuple:
         city_btns,
         [
             InlineKeyboardButton(text="🔄 Обновить",    callback_data=f"search:{norm[:38]}"),
-            InlineKeyboardButton(text="🌍 Все города",  callback_data=f"allcities:{norm[:36]}"),
-            InlineKeyboardButton(text="📥 Excel",       callback_data=f"excel:{norm[:36]}"),
+            InlineKeyboardButton(text="🌍 Все города",  callback_data=f"ac:{cache_query(norm)}"),
+            InlineKeyboardButton(text="📥 Excel",       callback_data=f"exc:{cache_query(norm)}"),
         ],
     ]) if city_btns else None
 
@@ -857,6 +879,17 @@ async def cb_search(cb: CallbackQuery):
     text, kb = fmt_result(items, query, norm)
     await cb.message.answer(text, parse_mode="Markdown", reply_markup=kb)
 
+@router.callback_query(F.data.startswith("sq:"))
+async def cb_search_cached(cb: CallbackQuery):
+    """Поиск по кэшированному ключу (обход лимита 64 байта)."""
+    qkey  = cb.data.replace("sq:","")
+    query = get_query(qkey)
+    await cb.answer("Ищу...")
+    items, norm = await search_prices(query)
+    # Уточнение не нужно — пользователь уже выбрал конкретный вариант
+    text, kb = fmt_result(items, query, norm)
+    await cb.message.answer(text, parse_mode="Markdown", reply_markup=kb)
+
 @router.callback_query(F.data.startswith("allcities:"))
 async def cb_allcities(cb: CallbackQuery):
     query = cb.data.replace("allcities:","")
@@ -889,6 +922,39 @@ async def cb_excel(cb: CallbackQuery):
         caption=f"📥 *{norm}* — {len(set(i['city'] for i in items))} городов",
         parse_mode="Markdown",
     )
+
+@router.callback_query(F.data.startswith("exc:"))
+async def cb_excel_cached(cb: CallbackQuery):
+    query = get_query(cb.data.replace("exc:",""))
+    await cb.answer("Формирую Excel...")
+    items, norm = await search_prices(query)
+    if not items: await cb.message.answer("Нет данных для экспорта."); return
+    buf = await export_to_excel(items, norm)
+    fname = f"prices_{norm[:20].replace(' ','_')}_{TODAY}.xlsx"
+    await cb.message.answer_document(
+        BufferedInputFile(buf.read(), filename=fname),
+        caption=f"📥 *{norm}* — {len(set(i['city'] for i in items))} городов",
+        parse_mode="Markdown",
+    )
+
+@router.callback_query(F.data.startswith("ac:"))
+async def cb_allcities_cached(cb: CallbackQuery):
+    query = get_query(cb.data.replace("ac:",""))
+    await cb.answer()
+    items, norm = await search_prices(query)
+    if not items: await cb.message.answer(f"❌ Ничего не найдено по «{norm}»"); return
+    by_city: dict[str, dict] = {}
+    for item in items:
+        city = item["city"]
+        if city not in by_city or item["price"] < by_city[city]["price"]:
+            by_city[city] = item
+    sorted_items = sorted(by_city.values(), key=lambda x: x["price"])
+    lines = [f"📦 *{norm}* — все города\n"]
+    for item in sorted_items:
+        dt  = fmtD(item.get("price_date"))
+        sup = item.get("supplier_name") or "—"
+        lines.append(f"• *{item['city']}* — {fmt(item['price'])} р/{item['unit']}  _{sup} · {dt}_")
+    await cb.message.answer("\n".join(lines), parse_mode="Markdown")
 
 # ── Document handler ───────────────────────────────────────────────────────────
 @router.message(F.document)
