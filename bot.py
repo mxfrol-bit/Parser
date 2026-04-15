@@ -196,7 +196,7 @@ def python_parse_excel(raw_bytes: bytes) -> tuple[list, str | None]:
 async def ai_parse_sheet(sheet_name: str, text: str, price_date: str) -> list[dict]:
     lines = text.split("\n")
     header, data_lines = lines[:2], lines[2:]
-    BATCH, OVERLAP = 60, 10
+    BATCH, OVERLAP = 25, 5  # 25 строк → ~5000 токенов JSON, влезает в 8000
     result, prev_tail = [], []
 
     chunks = [data_lines] if len(data_lines) <= BATCH else []
@@ -233,13 +233,13 @@ async def ai_parse_sheet(sheet_name: str, text: str, price_date: str) -> list[di
         try:
             if claude:
                 r = await claude.messages.create(
-                    model=MODEL_CLAUDE, max_tokens=4000,
+                    model=MODEL_CLAUDE, max_tokens=8000,
                     messages=[{"role":"user","content":prompt}],
                 )
                 raw_text = r.content[0].text.strip()
             else:
                 r = await ai.chat.completions.create(
-                    model=MODEL_TEXT, max_tokens=4000, temperature=0,
+                    model=MODEL_TEXT, max_tokens=8000, temperature=0,
                     messages=[{"role":"user","content":prompt}],
                 )
                 raw_text = r.choices[0].message.content.strip()
@@ -249,7 +249,19 @@ async def ai_parse_sheet(sheet_name: str, text: str, price_date: str) -> list[di
             result.extend(parsed)
             log.info(f"Sheet '{sheet_name}' batch {batch_n+1}/{len(chunks)}: {len(parsed)} rows")
         except json.JSONDecodeError as e:
-            log.warning(f"Sheet '{sheet_name}' batch {batch_n+1} JSON error: {e}")
+            log.warning(f"Sheet '{sheet_name}' batch {batch_n+1} JSON error: {e} | trying repair...")
+            # Попытка дорезать JSON — обрезаем до последней полной записи
+            try:
+                last_brace = raw_text.rfind("},")
+                if last_brace > 10:
+                    repaired = raw_text[:last_brace+1] + "]"
+                    parsed = json.loads(repaired)
+                    result.extend(parsed)
+                    log.info(f"  Repaired: {len(parsed)} rows")
+                else:
+                    log.warning(f"  Cannot repair")
+            except Exception as e2:
+                log.warning(f"  Repair failed: {e2}")
         except Exception as e:
             log.warning(f"Sheet '{sheet_name}' batch {batch_n+1} error: {e}")
 
