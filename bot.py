@@ -478,17 +478,20 @@ def fmt_result(items: list, query: str, norm: str) -> tuple:
     if len(by_city) > 10:
         lines.append(f"\n_...ещё {len(by_city)-10} городов_")
 
-    # Кнопки
-    city_btns = [
-        InlineKeyboardButton(text=f"📈 {item['city']}", callback_data=f"hist:{norm[:28]}:{item['city'][:18]}")
-        for item in sorted_items[:3]
-    ]
+    # Кнопки — все через кэш (лимит Telegram 64 байта)
+    city_btns = []
+    for item in sorted_items[:3]:
+        hkey = cache_query(f"hist:{norm}:{item['city']}")
+        city_btns.append(InlineKeyboardButton(
+            text=f"📈 {item['city']}", callback_data=f"hc:{hkey}"
+        ))
+    nkey = cache_query(norm)
     kb = InlineKeyboardMarkup(inline_keyboard=[
         city_btns,
         [
-            InlineKeyboardButton(text="🔄 Обновить",    callback_data=f"search:{norm[:38]}"),
-            InlineKeyboardButton(text="🌍 Все города",  callback_data=f"ac:{cache_query(norm)}"),
-            InlineKeyboardButton(text="📥 Excel",       callback_data=f"exc:{cache_query(norm)}"),
+            InlineKeyboardButton(text="🔄 Обновить",   callback_data=f"sq:{nkey}"),
+            InlineKeyboardButton(text="🌍 Все города", callback_data=f"ac:{nkey}"),
+            InlineKeyboardButton(text="📥 Excel",      callback_data=f"exc:{nkey}"),
         ],
     ]) if city_btns else None
 
@@ -867,6 +870,17 @@ async def cb_history(cb: CallbackQuery):
     parts = cb.data.split(":")
     product = parts[1] if len(parts)>1 else ""
     city    = parts[2] if len(parts)>2 else None
+    await cb.answer()
+    items = await get_history(product, city)
+    await cb.message.answer(fmt_history(items, product, city), parse_mode="Markdown")
+
+@router.callback_query(F.data.startswith("hc:"))
+async def cb_history_cached(cb: CallbackQuery):
+    """История цен по кэшированному ключу hist:product:city."""
+    raw   = get_query(cb.data.replace("hc:",""))
+    parts = raw.split(":", 2)
+    product = parts[1] if len(parts) > 1 else raw
+    city    = parts[2] if len(parts) > 2 else None
     await cb.answer()
     items = await get_history(product, city)
     await cb.message.answer(fmt_history(items, product, city), parse_mode="Markdown")
