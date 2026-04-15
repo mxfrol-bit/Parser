@@ -10,8 +10,9 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
-    BufferedInputFile, CallbackQuery,
+    BotCommand, BufferedInputFile, CallbackQuery,
     InlineKeyboardButton, InlineKeyboardMarkup, Message,
+    ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove,
 )
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
@@ -147,6 +148,23 @@ SYNONYMS = {
     "решетка": "георешетка", "геореш": "георешетка",
     "спанб": "спанбонд", "вата": "ватин",
 }
+
+# ── Reply keyboards (постоянное меню) ─────────────────────────────────────────
+def manager_menu() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(keyboard=[
+        [KeyboardButton(text="🔍 Найти цену"), KeyboardButton(text="📂 Каталог")],
+        [KeyboardButton(text="📥 Экспорт Excel"), KeyboardButton(text="📈 История цен")],
+        [KeyboardButton(text="👤 Профиль"), KeyboardButton(text="🤖 Помощник")],
+    ], resize_keyboard=True, input_field_placeholder="Напишите товар или выберите действие...")
+
+def snab_menu() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(keyboard=[
+        [KeyboardButton(text="📤 Загрузить прайс"), KeyboardButton(text="📋 История загрузок")],
+        [KeyboardButton(text="📍 Мой город"), KeyboardButton(text="🏢 Мой поставщик")],
+        [KeyboardButton(text="👤 Профиль"), KeyboardButton(text="🔄 Сменить роль")],
+    ], resize_keyboard=True, input_field_placeholder="Отправьте файл прайса или выберите действие...")
+
+
 
 async def ai_normalize(query: str) -> str:
     q = query.lower().strip()
@@ -441,6 +459,55 @@ async def export_to_excel(items: list, query: str) -> BytesIO:
     buf.seek(0)
     return buf
 
+
+# ── AI Ассистент ───────────────────────────────────────────────────────────────
+ASSISTANT_SYSTEM = """Ты — умный помощник в системе агрегации цен на геоматериалы "Снабженец".
+Пользователь — менеджер по продажам. Он пишет тебе свободным текстом.
+
+Твоя задача: понять что он хочет и вернуть JSON с командой.
+
+Доступные команды:
+- search: поиск цены на товар. Поля: {"cmd":"search","query":"геотекстиль 200"}
+- history: история цен. Поля: {"cmd":"history","product":"геотекстиль 200","city":"Казань"}
+- catalog: показать каталог. Поля: {"cmd":"catalog"}
+- excel: экспорт в Excel. Поля: {"cmd":"excel","query":"геотекстиль"}
+- help: помощь. Поля: {"cmd":"help"}
+- unknown: непонятный запрос — ответь текстом. Поля: {"cmd":"unknown","reply":"текст ответа"}
+
+Примеры:
+"покажи цену на геотекстиль 200" → {"cmd":"search","query":"геотекстиль 200"}
+"сколько стоит мембрана" → {"cmd":"search","query":"геомембрана"}
+"история цен на гт200 в казани" → {"cmd":"history","product":"геотекстиль 200","city":"Казань"}
+"выгрузи в эксель спанбонд" → {"cmd":"excel","query":"спанбонд"}
+"что умеешь" → {"cmd":"help"}
+"привет" → {"cmd":"unknown","reply":"Привет! Напишите название товара для поиска цены, или выберите действие в меню."}
+
+Отвечай ТОЛЬКО валидным JSON без markdown."""
+
+async def ai_assistant(text: str) -> dict:
+    """Понимает свободный текст и возвращает команду."""
+    try:
+        if claude:
+            r = await claude.messages.create(
+                model=MODEL_CLAUDE, max_tokens=200,
+                system=ASSISTANT_SYSTEM,
+                messages=[{"role":"user","content":text}],
+            )
+            raw = r.content[0].text.strip()
+        else:
+            r = await ai.chat.completions.create(
+                model=MODEL_TEXT, max_tokens=200, temperature=0,
+                messages=[
+                    {"role":"system","content":ASSISTANT_SYSTEM},
+                    {"role":"user","content":text},
+                ],
+            )
+            raw = r.choices[0].message.content.strip()
+        return json.loads(raw.replace("```json","").replace("```","").strip())
+    except Exception as e:
+        log.warning(f"assistant error: {e}")
+        return {"cmd":"search","query":text}  # fallback — просто ищем
+
 # ── Profile keyboard ───────────────────────────────────────────────────────────
 def profile_kb(role: str) -> InlineKeyboardMarkup:
     other_role  = "manager" if role == "snabzhenets" else "snabzhenets"
@@ -464,10 +531,12 @@ async def cmd_start(msg: Message, state: FSMContext):
         role_label = {"snabzhenets":"📦 Снабженец","manager":"🔍 Менеджер","admin":"⚙ Администратор"}.get(user["role"], user["role"])
         tip = "Отправляйте прайсы — файл, фото или текст." if user["role"] == "snabzhenets" \
               else "Напишите название товара для поиска цены."
+        menu = snab_menu() if user["role"] == "snabzhenets" else manager_menu()
         await msg.answer(
-            f"Вы в системе как *{role_label}* ({user['city']}).\n\n{tip}\n\n_/myinfo — профиль и смена роли_",
-            parse_mode="Markdown", reply_markup=profile_kb(user["role"]),
+            f"Вы в системе как *{role_label}* ({user['city']}).\n\n{tip}",
+            parse_mode="Markdown", reply_markup=menu,
         )
+        await msg.answer("Профиль и настройки:", reply_markup=profile_kb(user["role"]))
         return
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -498,8 +567,9 @@ async def reg_city(msg: Message, state: FSMContext):
         }).execute()
         await state.clear()
         await msg.answer(
-            f"✅ Вы *Менеджер*, г. {city}\n\nНапишите название товара:\n_геотекстиль 200 / мембрана 1мм / спанбонд 60_",
+            f"✅ Вы *Менеджер*, г. {city}\n\nНапишите название товара или выберите действие в меню.",
             parse_mode="Markdown",
+            reply_markup=manager_menu(),
         )
 
 @router.message(Reg.supplier)
@@ -514,9 +584,9 @@ async def reg_supplier(msg: Message, state: FSMContext):
     await state.clear()
     await msg.answer(
         f"✅ *Снабженец* зарегистрирован!\n\n📍 Город: {data['city']}\n🏢 Поставщик: *{sup}*\n\n"
-        "Отправляйте прайсы — Excel, фото, текст.\nНейронка сама разберёт структуру.\n\n"
-        "_/myinfo — профиль · /setcity · /setsupplier_",
+        "Отправляйте прайсы через меню или прямо файлом.",
         parse_mode="Markdown",
+        reply_markup=snab_menu(),
     )
 
 # ── Profile commands ───────────────────────────────────────────────────────────
@@ -819,14 +889,50 @@ async def on_photo(msg: Message):
 
 # ── Text handler ───────────────────────────────────────────────────────────────
 @router.message(F.text & ~F.text.startswith("/"))
-async def on_text(msg: Message):
+async def on_text(msg: Message, state: FSMContext):
     user = await get_user(msg.from_user.id)
     if not user: await msg.answer("Начните с /start"); return
 
-    if user["role"] in ("snabzhenets","admin"):
+    text = msg.text.strip()
+
+    # ── Кнопки снабженца ────────────────────────────────────────────
+    if user["role"] in ("snabzhenets", "admin"):
+        if text == "📤 Загрузить прайс":
+            await msg.answer("Отправьте файл Excel, фото прайса или напишите цены текстом.")
+            return
+        if text == "📋 История загрузок":
+            uploads = await get_upload_history(msg.from_user.id)
+            if not uploads:
+                await msg.answer("Загрузок пока нет.")
+                return
+            lines = ["📋 *Ваши загрузки:*\n"]
+            for u in uploads[:8]:
+                fname = u.get("source_file") or "текст"
+                lines.append(f"• {fname[:30]} · {fmtD(u.get('price_date'))}")
+            kb = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="🗑 Удалить последний", callback_data="uploads:delete_last"),
+            ]])
+            await msg.answer("\n".join(lines), parse_mode="Markdown", reply_markup=kb)
+            return
+        if text == "📍 Мой город":
+            await msg.answer(f"Ваш город: *{user['city']}*\n\nВведите новый:", parse_mode="Markdown")
+            await state.set_state(Edit.city)
+            return
+        if text == "🏢 Мой поставщик":
+            sup = user.get("supplier_name") or "не указан"
+            await msg.answer(f"Поставщик: *{sup}*\n\nВведите новое название:", parse_mode="Markdown")
+            await state.set_state(Edit.supplier)
+            return
+        if text == "👤 Профиль":
+            await msg.answer(profile_text(user), parse_mode="Markdown", reply_markup=profile_kb(user["role"]))
+            return
+        if text == "🔄 Сменить роль":
+            await msg.answer(profile_text(user), parse_mode="Markdown", reply_markup=profile_kb(user["role"]))
+            return
+        # Текстовый прайс
         await msg.answer("⏳ Парсю прайс из текста...")
         try:
-            items = await ai_parse_text(msg.text)
+            items = await ai_parse_text(text)
             count = await save_prices(items, user, "text")
             if count:
                 await msg.answer(ok_msg(count, user["city"]), parse_mode="Markdown")
@@ -835,19 +941,155 @@ async def on_text(msg: Message):
         except Exception as e:
             log.error(f"text parse error: {e}", exc_info=True)
             await msg.answer("❌ Не удалось распознать.")
-    else:
-        await msg.answer("🔍 Ищу...")
+        return
+
+    # ── Кнопки менеджера ────────────────────────────────────────────
+    if text == "👤 Профиль":
+        await msg.answer(profile_text(user), parse_mode="Markdown", reply_markup=profile_kb(user["role"]))
+        return
+    if text == "🔄 Сменить роль":
+        await msg.answer(profile_text(user), parse_mode="Markdown", reply_markup=profile_kb(user["role"]))
+        return
+    if text == "📂 Каталог":
+        r = supabase.table("prices_latest").select("category").execute()
+        cats = {}
+        for row in r.data:
+            c = row.get("category") or "прочее"
+            cats[c] = cats.get(c, 0) + 1
+        lines = ["📂 *Каталог материалов:*\n"]
+        for cat, cnt in sorted(cats.items(), key=lambda x: -x[1]):
+            lines.append(f"• {cat} — {cnt} позиций")
+        lines.append("\n_Напишите название для поиска цены_")
+        await msg.answer("\n".join(lines), parse_mode="Markdown")
+        return
+    if text == "🤖 Помощник":
+        await msg.answer(
+            "🤖 *AI Помощник*\n\n"
+            "Пишите свободным языком:\n"
+            "_«сколько стоит геотекстиль 200»_\n"
+            "_«покажи мембрану дешевле 100 рублей»_\n"
+            "_«история цен на спанбонд в Казани»_\n"
+            "_«выгрузи анкера в Excel»_\n\n"
+            "Я пойму и выполню.",
+            parse_mode="Markdown",
+        )
+        return
+    if text == "📥 Экспорт Excel":
+        await msg.answer("Введите товар для экспорта в Excel:\n_геотекстиль / анкера / все_")
+        # Следующее сообщение обработается как поиск → excel
+        await state.update_data(pending_excel=True)
+        return
+    if text == "📈 История цен":
+        await msg.answer("Введите товар для просмотра истории цен:\n_геотекстиль 200 / мембрана / спанбонд 60_")
+        await state.update_data(pending_history=True)
+        return
+    if text == "🔍 Найти цену":
+        await msg.answer("Введите название товара:")
+        return
+
+    # ── AI Ассистент или поиск ───────────────────────────────────────
+    data = await state.get_data()
+
+    # Если ждали ввода для Excel
+    if data.get("pending_excel"):
+        await state.update_data(pending_excel=False)
+        await msg.answer("📥 Формирую Excel...")
+        items, norm = await search_prices(text)
+        if not items:
+            await msg.answer(f"❌ Ничего не найдено по «{norm}»")
+            return
+        buf = await export_to_excel(items, norm)
+        fname = f"prices_{norm[:20].replace(' ','_')}.xlsx"
+        await msg.answer_document(BufferedInputFile(buf.read(), filename=fname),
+            caption=f"📥 *{norm}*", parse_mode="Markdown")
+        return
+
+    # Если ждали ввода для истории
+    if data.get("pending_history"):
+        await state.update_data(pending_history=False)
+        items = await get_history(text)
+        await msg.answer(fmt_history(items, text), parse_mode="Markdown")
+        return
+
+    # AI решает что делать
+    await msg.answer("🤖 Думаю...")
+    try:
+        cmd = await ai_assistant(text)
+        action = cmd.get("cmd", "search")
+
+        if action == "search":
+            query = cmd.get("query", text)
+            items, norm = await search_prices(query)
+            result_text, kb = fmt_result(items, query, norm)
+            await msg.answer(result_text, parse_mode="Markdown", reply_markup=kb)
+
+        elif action == "history":
+            product = cmd.get("product", text)
+            city    = cmd.get("city")
+            items   = await get_history(product, city)
+            await msg.answer(fmt_history(items, product, city), parse_mode="Markdown")
+
+        elif action == "catalog":
+            r = supabase.table("prices_latest").select("category").execute()
+            cats = {}
+            for row in r.data:
+                c = row.get("category") or "прочее"
+                cats[c] = cats.get(c, 0) + 1
+            lines = ["📂 *Каталог:*\n"] + [f"• {c} — {n}" for c, n in sorted(cats.items(), key=lambda x:-x[1])]
+            await msg.answer("\n".join(lines), parse_mode="Markdown")
+
+        elif action == "excel":
+            query = cmd.get("query", text)
+            items, norm = await search_prices(query)
+            if items:
+                buf = await export_to_excel(items, norm)
+                await msg.answer_document(BufferedInputFile(buf.read(),
+                    filename=f"prices_{norm[:20].replace(' ','_')}.xlsx"),
+                    caption=f"📥 *{norm}*", parse_mode="Markdown")
+            else:
+                await msg.answer(f"❌ Ничего не найдено по «{norm}»")
+
+        elif action == "help":
+            await msg.answer(
+                "🤖 *Что я умею:*\n\n"
+                "• Найти цену: _«геотекстиль 200»_\n"
+                "• История: _«история гт200 Казань»_\n"
+                "• Каталог: _«каталог»_ или кнопка 📂\n"
+                "• Excel: _«выгрузи анкера»_ или кнопка 📥\n"
+                "• Сравнить: нажмите 🌍 Все города после поиска",
+                parse_mode="Markdown",
+            )
+
+        elif action == "unknown":
+            await msg.answer(cmd.get("reply", "Не понял запрос. Напишите название товара."))
+
+        else:
+            items, norm = await search_prices(text)
+            result_text, kb = fmt_result(items, text, norm)
+            await msg.answer(result_text, parse_mode="Markdown", reply_markup=kb)
+
+    except Exception as e:
+        log.error(f"assistant/search error: {e}", exc_info=True)
+        # Fallback — просто ищем
         try:
-            items, norm = await search_prices(msg.text)
-            text, kb = fmt_result(items, msg.text.strip(), norm)
-            await msg.answer(text, parse_mode="Markdown", reply_markup=kb)
-        except Exception as e:
-            log.error(f"search error: {e}", exc_info=True)
-            await msg.answer("❌ Ошибка поиска. Попробуйте ещё раз.")
+            items, norm = await search_prices(text)
+            result_text, kb = fmt_result(items, text, norm)
+            await msg.answer(result_text, parse_mode="Markdown", reply_markup=kb)
+        except:
+            await msg.answer("❌ Ошибка. Попробуйте ещё раз.")
 
 # ── Run ────────────────────────────────────────────────────────────────────────
 async def main():
     log.info("Starting Snabzhenets bot...")
+    await bot.set_my_commands([
+        BotCommand(command="start",       description="Главное меню"),
+        BotCommand(command="myinfo",      description="Профиль и смена роли"),
+        BotCommand(command="catalog",     description="Каталог материалов"),
+        BotCommand(command="history",     description="История цен"),
+        BotCommand(command="setcity",     description="Сменить город"),
+        BotCommand(command="setsupplier", description="Сменить поставщика"),
+        BotCommand(command="users",       description="Пользователи (admin)"),
+    ])
     await dp.start_polling(bot, skip_updates=True)
 
 if __name__ == "__main__":
