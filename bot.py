@@ -520,13 +520,24 @@ async def cmd_myinfo(msg: Message):
     await msg.answer(profile_text(user), parse_mode="Markdown", reply_markup=profile_kb(user["role"]))
 
 @router.callback_query(F.data.startswith("switchrole:"))
-async def cb_switchrole(cb: CallbackQuery):
+async def cb_switchrole(cb: CallbackQuery, state: FSMContext):
     new_role = cb.data.split(":")[1]
     user = await get_user(cb.from_user.id)
     if not user: await cb.answer("Сначала /start"); return
+
     if new_role == "snabzhenets" and not user.get("supplier_name"):
-        await cb.answer("Сначала укажите поставщика: /setsupplier", show_alert=True); return
-    supabase.table("users").update({"role":new_role}).eq("telegram_id",cb.from_user.id).execute()
+        # Не алерт — просим ввести поставщика прямо здесь
+        await cb.answer()
+        await cb.message.answer(
+            "Введите *название поставщика* для завершения смены роли:\n"
+            "_ООО Армпласт, ИП Иванов..._",
+            parse_mode="Markdown",
+        )
+        await state.update_data(pending_role="snabzhenets")
+        await state.set_state(Edit.supplier)
+        return
+
+    supabase.table("users").update({"role": new_role}).eq("telegram_id", cb.from_user.id).execute()
     user["role"] = new_role
     await cb.answer("Роль изменена!")
     await cb.message.edit_text(profile_text(user), parse_mode="Markdown", reply_markup=profile_kb(new_role))
@@ -548,10 +559,21 @@ async def edit_city(msg: Message, state: FSMContext):
 
 @router.message(Edit.supplier)
 async def edit_supplier(msg: Message, state: FSMContext):
-    sup = msg.text.strip()
-    supabase.table("users").update({"supplier_name":sup}).eq("telegram_id",msg.from_user.id).execute()
+    sup  = msg.text.strip()
+    data = await state.get_data()
+    updates = {"supplier_name": sup}
+    # Если ждали поставщика чтобы сменить роль
+    if data.get("pending_role"):
+        updates["role"] = data["pending_role"]
+    supabase.table("users").update(updates).eq("telegram_id", msg.from_user.id).execute()
     await state.clear()
-    await msg.answer(f"✅ Поставщик: *{sup}*", parse_mode="Markdown")
+    user = await get_user(msg.from_user.id)
+    role_label = {"snabzhenets":"📦 Снабженец","manager":"🔍 Менеджер"}.get(user["role"], user["role"])
+    await msg.answer(
+        f"✅ Поставщик: *{sup}* · Роль: {role_label}\n\nОтправляйте прайсы — файл, фото или текст.",
+        parse_mode="Markdown",
+        reply_markup=profile_kb(user["role"]),
+    )
 
 @router.message(F.text.startswith("/setcity"))
 async def cmd_setcity(msg: Message, state: FSMContext):
