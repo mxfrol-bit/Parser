@@ -331,6 +331,76 @@ def ok_msg(count: int, city: str, price_date: str = None, sheet_report: str = ""
         lines.append(f"\n{sheet_report}")
     return "\n".join(lines)
 
+
+async def clarify_if_needed(msg: Message, query: str, items: list, norm: str) -> bool:
+    """
+    Если запрос слишком широкий — показывает уточняющие кнопки.
+    Возвращает True если уточнение показано (ответ уже отправлен).
+    """
+    # Считаем уникальные варианты продукта
+    products = list({item["product"] for item in items})
+
+    # Критерий широкого запроса: много разных товаров И запрос короткий (1-2 слова)
+    query_words = norm.strip().split()
+    if len(query_words) > 2 or len(products) <= 3:
+        return False  # запрос уже конкретный
+
+    # Собираем варианты для уточнения из базы
+    # Группируем по плотности/толщине если есть
+    variants = {}
+    for item in items:
+        product = item["product"]
+        density = item.get("density")
+        thickness = item.get("thickness")
+        tech = item.get("technology", "")
+
+        if density:
+            key = f"{int(density)} г/м²"
+        elif thickness:
+            key = f"{thickness} мм"
+        else:
+            # Берём уникальную часть названия
+            key = product.replace(norm, "").strip().strip("-·,").strip()
+            if not key:
+                key = product
+
+        if key not in variants:
+            variants[key] = product
+
+    if len(variants) <= 1:
+        return False  # нечего уточнять
+
+    # Не больше 6 кнопок
+    variant_keys = list(variants.keys())[:6]
+
+    # Строим inline keyboard с вариантами
+    buttons = []
+    row = []
+    for i, key in enumerate(variant_keys):
+        full_query = f"{norm} {key}" if key not in norm else norm
+        row.append(InlineKeyboardButton(
+            text=key,
+            callback_data=f"search:{full_query[:38]}"
+        ))
+        if len(row) == 2 or i == len(variant_keys) - 1:
+            buttons.append(row)
+            row = []
+
+    # Добавить кнопку "Показать все"
+    buttons.append([InlineKeyboardButton(
+        text=f"📦 Все варианты ({len(products)})",
+        callback_data=f"search:{norm[:38]}"
+    )])
+
+    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+    await msg.answer(
+        f"🔍 *{norm}* — уточните запрос:\n\n"
+        f"Найдено {len(products)} вариантов. Какой нужен?",
+        parse_mode="Markdown",
+        reply_markup=kb,
+    )
+    return True
+
 def fmt_result(items: list, query: str, norm: str) -> tuple:
     if not items:
         return (
@@ -1020,8 +1090,13 @@ async def on_text(msg: Message, state: FSMContext):
         if action == "search":
             query = cmd.get("query", text)
             items, norm = await search_prices(query)
-            result_text, kb = fmt_result(items, query, norm)
-            await msg.answer(result_text, parse_mode="Markdown", reply_markup=kb)
+            # Проверяем нужно ли уточнение
+            if items and not await clarify_if_needed(msg, query, items, norm):
+                result_text, kb = fmt_result(items, query, norm)
+                await msg.answer(result_text, parse_mode="Markdown", reply_markup=kb)
+            elif not items:
+                result_text, kb = fmt_result(items, query, norm)
+                await msg.answer(result_text, parse_mode="Markdown", reply_markup=kb)
 
         elif action == "history":
             product = cmd.get("product", text)
@@ -1073,8 +1148,12 @@ async def on_text(msg: Message, state: FSMContext):
         # Fallback — просто ищем
         try:
             items, norm = await search_prices(text)
-            result_text, kb = fmt_result(items, text, norm)
-            await msg.answer(result_text, parse_mode="Markdown", reply_markup=kb)
+            if items and not await clarify_if_needed(msg, text, items, norm):
+                result_text, kb = fmt_result(items, text, norm)
+                await msg.answer(result_text, parse_mode="Markdown", reply_markup=kb)
+            elif not items:
+                result_text, kb = fmt_result(items, text, norm)
+                await msg.answer(result_text, parse_mode="Markdown", reply_markup=kb)
         except:
             await msg.answer("❌ Ошибка. Попробуйте ещё раз.")
 
